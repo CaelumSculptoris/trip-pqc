@@ -27,3 +27,7 @@ Formal proofs linking Hopfield-based obfuscation to cryptographic hardness need 
 Performance benchmarks and optimization for practical deployment are outstanding research areas.
 
 Quantum resilience of the combined nonlinear mappings requires rigorous analysis.
+
+## Notes
+* I conceptualized this idea after one cup of coffee immediately upon waking up. 
+* I am not a professional. I'm just an out of work software engineer who enjoys thinking about solutions to hard problems.
