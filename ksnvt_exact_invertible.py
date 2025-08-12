@@ -7,6 +7,7 @@ def key_to_params(key, size):
     return scale, shift
 
 def affine_coupling_layer(x, scale, shift, invert=False):
+    x = np.asarray(x, dtype=float)  # Ensure numeric type
     d = len(x)
     assert d % 2 == 0, "Input dimension must be even"
     x1, x2 = x[:d//2], x[d//2:]
@@ -21,17 +22,19 @@ def affine_coupling_layer(x, scale, shift, invert=False):
     return np.concatenate([y1, y2])
 
 def encrypt(vec, key):
+    vec = np.asarray(vec, dtype=float)  # Just in case
     scale, shift = key_to_params(key, len(vec)//2)
     return affine_coupling_layer(vec, scale, shift, invert=False)
 
 def decrypt(vec, key):
+    vec = np.asarray(vec, dtype=float)  # Just in case
     scale, shift = key_to_params(key, len(vec)//2)
     return affine_coupling_layer(vec, scale, shift, invert=True)
 
 def vectorize_message(message_str, vec_size):
-    vec = np.zeros(vec_size)
+    vec = np.zeros(vec_size, dtype=float)
     message_bytes = message_str.encode('utf-8')[:vec_size]
-    vec[:len(message_bytes)] = np.array(message_bytes) / 255.0
+    vec[:len(message_bytes)] = np.frombuffer(message_bytes, dtype=np.uint8).astype(float) / 255.0
     return vec
 
 def devectorize_message(vec):
