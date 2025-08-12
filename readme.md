@@ -31,3 +31,4 @@ Quantum resilience of the combined nonlinear mappings requires rigorous analysis
 ## Notes
 * I conceptualized this idea after one cup of coffee immediately upon waking up. 
 * I am not a professional. I'm just an out of work software engineer who enjoys thinking about solutions to hard problems.
+* Decided to try a simplified approach.
