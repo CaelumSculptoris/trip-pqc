@@ -77,11 +77,11 @@ def devectorize_message(vec):
 if __name__ == "__main__":
     # Use a 256-bit key (32 bytes) for security
     key = secrets.token_bytes(32)
-    message = "ExactInvert"
-    vec_size = 16
+    message = "This work proposes a novel approach to post-quantum cryptography (PQC) leveraging key-seeded nonlinear invertible transforms acting on vectorized messages. By using secret keys as seeds to generate parameters of nonlinear yet exactly invertible mappings—such as affine coupling layers inspired by invertible neural networks—messages are encrypted into high-dimensional vectors. Decryption requires the secret key to exactly invert these transforms, while attackers face the complexity of inverting nonlinear mappings without a trapdoor."
+    vec_size = int(len(message)*1.1)
     if vec_size % 2 != 0:
         vec_size += 1
-    layers = 1  # Single layer to match original
+    layers = 10  # Single layer to match original
 
     print(f"Original message: {message}")
     msg_vec = vectorize_message(message, vec_size)
