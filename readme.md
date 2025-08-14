@@ -33,3 +33,5 @@ Quantum resilience of the combined nonlinear mappings requires rigorous analysis
 * I am not a professional. I'm just an out of work software engineer who enjoys thinking about solutions to hard problems.
 * Decided to try a simplified approach.
 * Decided to completely abandon this idea as it probably isn't good. 
+* Organized file structures. Reverted original file to adhere to name schema.
+* Compounded solution to a single file.
