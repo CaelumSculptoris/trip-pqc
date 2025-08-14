@@ -36,9 +36,9 @@ Quantum algorithms pose risks to classical encryption. Embedding plaintext into 
 ## Usage
 
 ### Encrypt & Save
-    ```bash
+    
     python3 cli/ksnvt.py
-    ```
+
 1. Choose `1) Encrypt & save`.
 2. Enter your message.
 3. Set the number of INN layers (default 10).
@@ -46,25 +46,25 @@ Quantum algorithms pose risks to classical encryption. Embedding plaintext into 
 5. The encryption key (hex) will be displayed; keep it safe.
 
 ### Load & Decrypt
-    ```bash
+    
     python3 cli/ksnvt.py
-    ```
+    
 1. Choose `2) Load & decrypt`.
 2. Provide the encrypted vector filename.
 3. Enter the number of INN layers used during encryption.
 4. Decrypted message will be displayed.
 
 ## Testing
-    ```bash
+    
     python3 cli/tests.py
-    ```
+    
 - Prompts for the encrypted vector file.
 - Tests multiple messages for correct reconstruction using the saved key.
 
 ## Benchmarking
-    ```bash
+    
     python3 cli/benchmark.py
-    ```
+    
 - Prompts for the encrypted vector file.
 - Optionally set the number of INN layers.
 - Reports encryption/decryption times and reconstruction error.
@@ -72,7 +72,7 @@ Quantum algorithms pose risks to classical encryption. Embedding plaintext into 
 ## Example Workflow
 
 ### 1. Encrypt a Message
-    ```bash
+    
     $ python3 cli/ksnvt.py
     Choose action:
     1) Encrypt & save
@@ -84,10 +84,10 @@ Quantum algorithms pose risks to classical encryption. Embedding plaintext into 
     Encrypted vector saved to encrypted_vector.npz
     Encryption key (hex): 8f2a1b... (keep this safe)
     Layers used: 12
-    ```
+    
 
 ### 2. Decrypt a Message
-    ```bash
+    
     $ python3 cli/ksnvt.py
     Choose action:
     1) Encrypt & save
@@ -97,10 +97,10 @@ Quantum algorithms pose risks to classical encryption. Embedding plaintext into 
     Number of INN layers used during encryption: 12
     Decrypted message: Hello PQC world!
     Layers used: 12
-    ```
+    
 
 ### 3. Run Tests
-    ```bash
+    
     $ python3 cli/tests.py
     Enter encrypted vector file to test: encrypted_vector.npz
     Testing message: Hello PQC world!
@@ -109,10 +109,10 @@ Quantum algorithms pose risks to classical encryption. Embedding plaintext into 
     Success!
     Testing message: Null byte test:
     Success!
-    ```
+    
 
 ### 4. Run Benchmark
-    ```bash
+    
     $ python3 cli/benchmark.py
     Enter encrypted vector file for benchmark: encrypted_vector.npz
     Number of INN layers (default 10): 12
@@ -120,7 +120,7 @@ Quantum algorithms pose risks to classical encryption. Embedding plaintext into 
     Encryption time: 0.002134s
     Decryption time: 0.002048s
     Reconstruction error (L2 norm): 0.000000e+00
-    ```
+    
 
 ## Contributing & Feedback
 - This is an experimental PQC research project. Feedback from the cryptography community is welcome.
