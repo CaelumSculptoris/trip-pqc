@@ -19,3 +19,11 @@ Quantum algorithms pose risks to classical encryption. Embedding plaintext into 
 - Security has **not been formally analyzed**. Use for learning and prototyping only.
 
 ## Getting Started
+
+### Requirements
+- Python 3.9+
+- Numpy
+
+    ```bash
+    pip install numpy
+    ```
