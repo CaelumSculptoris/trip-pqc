@@ -2,6 +2,8 @@ import numpy as np
 import secrets
 import hashlib
 import base64
+import json
+import os
 
 class bcolors:
     HEADER = '\033[95m'
@@ -14,8 +16,7 @@ class bcolors:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
 
-# --- INN helper functions ---
-
+# ----------------- INN Functions -----------------
 def key_to_params(key, size, layer_idx=0):
     seed = hashlib.sha256(key + layer_idx.to_bytes(4,'big')).digest()
     rng = np.random.default_rng(np.frombuffer(seed, dtype=np.uint32))
@@ -43,44 +44,38 @@ def affine_coupling_layer(x, scale, shift, invert=False):
     return np.concatenate([y1, y2])
 
 def add_noise(vec, key, noise_level=1e-5):
-    vec = np.asarray(vec, dtype=np.float64)
-    noise = key_to_noise(key, vec.shape[0], noise_level)
-    return vec + noise, noise
+    return vec + key_to_noise(key, vec.shape[0], noise_level)
 
-def denoise(vec, noise):
-    return vec - noise
+def denoise(vec, key, noise_level=1e-5):
+    return vec - key_to_noise(key, vec.shape[0], noise_level)
 
 def encrypt(vec, key, layers=10):
     vec = np.asarray(vec, dtype=np.float64)
     for i in range(layers):
         scale, shift = key_to_params(key, len(vec)//2, i)
         vec = affine_coupling_layer(vec, scale, shift, invert=False)
-    vec, noise = add_noise(vec, key)
-    return vec, noise
+    vec = add_noise(vec, key)
+    return vec
 
-def decrypt(vec, noise, key, layers=10):
-    vec = denoise(vec, noise)
+def decrypt(vec, key, layers=10):
+    vec = denoise(vec, key)
     for i in range(layers-1, -1, -1):
         scale, shift = key_to_params(key, len(vec)//2, i)
         vec = affine_coupling_layer(vec, scale, shift, invert=True)
     return vec
 
-# --- Base64-safe vectorization ---
-
+# ----------------- Vectorization -----------------
 def vectorize_message(message_str):
-    """Convert message to float vector in [-1,1] using Base64-safe encoding."""
     b64_bytes = base64.b64encode(message_str.encode('utf-8'))
     vec = np.frombuffer(b64_bytes, dtype=np.uint8).astype(np.float64)
-    vec = vec / 127.5 - 1.0  # map 0-255 → -1 to 1
+    vec = vec / 127.5 - 1.0  # Normalize to [-1, 1]
     if len(vec) % 2 != 0:
-        vec = np.append(vec, 0.0)  # pad to even length
+        vec = np.append(vec, 0.0)
     return vec
 
 def devectorize_message(vec):
-    """Convert float vector back to string via Base64 decoding."""
     vec = np.asarray(vec, dtype=np.float64)
-    bytes_vec = np.round((vec + 1.0) * 127.5).clip(0,255).astype(np.uint8)
-    # remove padding 0 if added
+    bytes_vec = np.round((vec + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
     bytes_vec = bytes_vec.tobytes().rstrip(b'\x00')
     try:
         decoded = base64.b64decode(bytes_vec)
@@ -90,24 +85,51 @@ def devectorize_message(vec):
         print(f"Raw Base64 bytes: {bytes_vec}")
         return None
 
-# --- Example usage ---
+# ----------------- File Persistence -----------------
+def save_encrypted(filename, encrypted_vec, key):
+    data = {"vector": encrypted_vec.tolist(), "key": key.hex()}
+    with open(filename, 'w') as f:
+        json.dump(data, f)
 
+def load_encrypted(filename):
+    with open(filename, 'r') as f:
+        data = json.load(f)
+    encrypted_vec = np.array(data["vector"], dtype=np.float64)
+    key = bytes.fromhex(data["key"])
+    return encrypted_vec, key
+
+# ----------------- CLI -----------------
 if __name__ == "__main__":
-    key = secrets.token_bytes(32)
-    message = input(f"{bcolors.BOLD}Message to encrypt: ")
-    vec = vectorize_message(message)
-    layers = 10
+    print("Choose action:")
+    print("1) Encrypt & save")
+    print("2) Load & decrypt")
+    choice = input("Enter 1 or 2: ").strip()
 
-    print(f"{bcolors.OKBLUE}Original message: {message}{bcolors.ENDC}")
+    layers_input = input("Number of INN layers (default 10): ").strip()
+    layers = int(layers_input) if layers_input else 10
 
-    encrypted_vec, noise = encrypt(vec, key, layers=layers)
-    print(f"{bcolors.OKGREEN}Encrypted vector: {encrypted_vec}{bcolors.ENDC}")
+    if choice == "1":
+        message = input("Message to encrypt: ")
+        vec = vectorize_message(message)
+        key = secrets.token_bytes(32)
+        encrypted_vec = encrypt(vec, key, layers=layers)
 
-    decrypted_vec = decrypt(encrypted_vec, noise, key, layers=layers)
-    decrypted_msg = devectorize_message(decrypted_vec)
-    print(f"{bcolors.OKCYAN}Decrypted message: {decrypted_msg}{bcolors.ENDC}")
+        filename = input("Save encrypted data to filename: ").strip()
+        save_encrypted(filename, encrypted_vec, key)
+        print(f"Encrypted vector saved to {filename}")
+        print(f"Encryption key (hex): {key.hex()}")
+        print(f"Layers used: {layers}")
 
-    if decrypted_msg == message:
-        print(f"{bcolors.BOLD}{bcolors.OKGREEN}Success: exact recovery!{bcolors.ENDC}")
+    elif choice == "2":
+        filename = input("Enter encrypted vector file to load: ").strip()
+        if not os.path.exists(filename):
+            print(f"File not found: {filename}")
+            exit(1)
+        encrypted_vec, key = load_encrypted(filename)
+        decrypted_vec = decrypt(encrypted_vec, key, layers=layers)
+        decrypted_msg = devectorize_message(decrypted_vec)
+        print(f"Decrypted message: {decrypted_msg}")
+        print(f"Layers used: {layers}")
+
     else:
-        print(f"{bcolors.BOLD}{bcolors.FAIL}Error: recovery failed.{bcolors.ENDC}")
+        print("Invalid choice")

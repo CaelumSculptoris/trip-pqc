@@ -1,7 +1,7 @@
 import secrets
 import numpy as np
 import time
-from ksnvt_improved import (
+from improved import (
     vectorize_message,
     devectorize_message,
     encrypt,
