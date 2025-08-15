@@ -83,7 +83,7 @@ def devectorize_message(vec):
         return decoded.decode('utf-8')
     except Exception as e:
         print(f"{bcolors.FAIL}Decoding error: {e}{bcolors.ENDC}")
-        print(f"Raw Base64 bytes: {bytes_vec}")
+        print(f"{bcolors.OKGREEN}Raw Base64 bytes: {bytes_vec}{bcolors.ENDC}")
         return None
 
 # ----------------- File Persistence -----------------
@@ -101,9 +101,9 @@ def load_encrypted(filename):
 
 # ----------------- CLI -----------------
 if __name__ == "__main__":
-    print("Choose action:")
-    print("1) Encrypt & save")
-    print("2) Load & decrypt")
+    print(f"{bcolors.BOLD}Choose action:{bcolors.ENDC}")
+    print(f"{bcolors.BOLD}1) Encrypt & save{bcolors.ENDC}")
+    print(f"{bcolors.BOLD}2) Load & decrypt{bcolors.ENDC}")
     choice = input("Enter 1 or 2: ").strip()
 
     layers_input = input("Number of INN layers (default 10): ").strip()
@@ -117,20 +117,22 @@ if __name__ == "__main__":
 
         filename = input("Save encrypted data to filename: ").strip()
         save_encrypted(filename, encrypted_vec, key)
-        print(f"Encrypted vector saved to {filename}")
-        print(f"Encryption key (hex): {key.hex()}")
-        print(f"Layers used: {layers}")
+        print(f"Encrypted vector saved to {bcolors.OKCYAN}{filename}{bcolors.ENDC}")
+        print(f"Encryption key (hex): {bcolors.OKCYAN}{key.hex()}{bcolors.ENDC}")
+        print(f"Layers: {bcolors.OKGREEN}{layers}{bcolors.ENDC}")
+        print(f"Vector: {bcolors.OKGREEN}{encrypted_vec}{bcolors.ENDC}")
 
     elif choice == "2":
-        filename = input("Enter encrypted vector file to load: ").strip()
+        filename = input(f"{bcolors.BOLD}Enter encrypted vector file to load: {bcolors.ENDC}").strip()
         if not os.path.exists(filename):
-            print(f"File not found: {filename}")
+            print(f"{bcolors.FAIL}File not found: {filename}{bcolors.ENDC}")
             exit(1)
         encrypted_vec, key = load_encrypted(filename)
         decrypted_vec = decrypt(encrypted_vec, key, layers=layers)
         decrypted_msg = devectorize_message(decrypted_vec)
-        print(f"Decrypted message: {decrypted_msg}")
-        print(f"Layers used: {layers}")
+        print(f"Decrypted message: {bcolors.OKCYAN}{decrypted_msg}{bcolors.ENDC}")
+        print(f"Layers: {bcolors.OKGREEN}{layers}{bcolors.ENDC}")
+        print(f"Vector: {bcolors.OKGREEN}{decrypted_vec}{bcolors.ENDC}")
 
     else:
-        print("Invalid choice")
+        print(f"{bcolors.FAIL}Invalid choice{bcolors.ENDC}")

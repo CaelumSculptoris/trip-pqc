@@ -1,4 +1,4 @@
-from ksnvt import vectorize_message, devectorize_message, encrypt, decrypt, bcolors, load_encrypted
+from veinn import vectorize_message, devectorize_message, encrypt, decrypt, bcolors, load_encrypted
 
 def test_file(filename, layers=10):
     encrypted_vec, key = load_encrypted(filename)

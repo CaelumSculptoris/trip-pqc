@@ -1,5 +1,5 @@
 import time
-from ksnvt import encrypt, decrypt, load_encrypted, bcolors
+from veinn import encrypt, decrypt, load_encrypted, bcolors
 import numpy as np
 
 def benchmark_file(filename, layers=10):
