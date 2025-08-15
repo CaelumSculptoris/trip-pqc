@@ -1,4 +1,4 @@
-![alt text](veinn.png "But you have heard of me.")
+![alt text](veinn.jpg "But you have heard of me.")
 # VEINN – Vector Encrypted Invertible Neural Network
 
 ## Overview
