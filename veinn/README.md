@@ -87,6 +87,9 @@ Cryptographers, security researchers, and ML specialists are invited to:
 - Provide formal security proofs
 
 ---
+## Notes:
+- After feedback from the crypto community it was made clear that I'm completely out of my element and categorically wrong about my ideas. Therefore I am abandoning this repo.
+
 
 ## License
 [MIT License](https://opensource.org/license/mit)  
