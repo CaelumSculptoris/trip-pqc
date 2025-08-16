@@ -15,32 +15,34 @@ class bcolors:
     ENDC = '\033[0m'
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
+# ----------------- Fixed-point configuration -----------------
+SCALE = 1_000_000  # six decimal places, controls precision
 
 # ----------------- INN Functions -----------------
 def key_to_params(key, size, layer_idx=0):
     seed = hashlib.sha256(key + layer_idx.to_bytes(4,'big')).digest()
     rng = np.random.default_rng(np.frombuffer(seed, dtype=np.uint32))
-    scale = rng.uniform(0.8, 1.2, size).astype(np.float64)
-    shift = rng.uniform(-0.2, 0.2, size).astype(np.float64)
+    scale = rng.integers(int(0.8*SCALE), int(1.2*SCALE)+1, size=size)
+    shift = rng.integers(int(-0.2*SCALE), int(0.2*SCALE)+1, size=size)
     return scale, shift
 
 def key_to_noise(key, size, noise_level=1e-5):
     seed = hashlib.sha256(key + b"noise").digest()
     rng = np.random.default_rng(np.frombuffer(seed, dtype=np.uint32))
-    noise = rng.normal(0, noise_level, size=size).astype(np.float64)
-    return noise
+    noise = rng.normal(0, noise_level, size=size) * SCALE
+    return np.round(noise).astype(np.int64)
 
 def affine_coupling_layer(x, scale, shift, invert=False):
-    x = np.asarray(x, dtype=np.float64)
+    x = np.asarray(x, dtype=np.int64)
     d = len(x)
     assert d % 2 == 0, "Input dimension must be even"
     x1, x2 = x[:d//2], x[d//2:]
     if not invert:
+        y2 = (x2 * scale + shift * x1) // SCALE
         y1 = x1
-        y2 = x2 * scale + shift * x1
     else:
         y1 = x1
-        y2 = (x2 - shift * x1) / scale
+        y2 = (x2 * SCALE - shift * x1) // scale
     return np.concatenate([y1, y2])
 
 def add_noise(vec, key, noise_level=1e-5):
@@ -50,7 +52,7 @@ def denoise(vec, key, noise_level=1e-5):
     return vec - key_to_noise(key, vec.shape[0], noise_level)
 
 def encrypt(vec, key, layers=10):
-    vec = np.asarray(vec, dtype=np.float64)
+    vec = np.asarray(vec, dtype=np.int64)
     for i in range(layers):
         scale, shift = key_to_params(key, len(vec)//2, i)
         vec = affine_coupling_layer(vec, scale, shift, invert=False)
@@ -59,7 +61,7 @@ def encrypt(vec, key, layers=10):
 
 def decrypt(vec, key, layers=10):
     vec = denoise(vec, key)
-    for i in range(layers-1, -1, -1):        
+    for i in range(layers-1, -1, -1):
         scale, shift = key_to_params(key, len(vec)//2, i)
         vec = affine_coupling_layer(vec, scale, shift, invert=True)
     return vec
@@ -67,22 +69,21 @@ def decrypt(vec, key, layers=10):
 # ----------------- Vectorization -----------------
 def vectorize_message(message_str):
     b64_bytes = base64.b64encode(message_str.encode('utf-8'))
-    vec = np.frombuffer(b64_bytes, dtype=np.uint8).astype(np.float64)
-    vec = vec / 127.5 - 1.0  # Normalize to [-1, 1]
+    vec = np.frombuffer(b64_bytes, dtype=np.uint8).astype(np.int64)
     if len(vec) % 2 != 0:
-        vec = np.append(vec, 0.0)
+        vec = np.append(vec, 0)
+    # scale bytes to fixed-point integers
+    vec = vec * SCALE // 127
     return vec
 
 def devectorize_message(vec):
-    vec = np.asarray(vec, dtype=np.float64)
-    bytes_vec = np.round((vec + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
-    bytes_vec = bytes_vec.tobytes().rstrip(b'\x00')
+    vec = np.asarray(vec, dtype=np.int64)
+    bytes_vec = ((vec * 127 + SCALE//2) // SCALE).astype(np.uint8).tobytes().rstrip(b'\x00')
     try:
         decoded = base64.b64decode(bytes_vec)
         return decoded.decode('utf-8')
     except Exception as e:
         print(f"{bcolors.FAIL}Decoding error: {e}{bcolors.ENDC}")
-        print(f"{bcolors.OKGREEN}Raw Base64 bytes: {bytes_vec}{bcolors.ENDC}")
         return None
 
 # ----------------- File Persistence -----------------
