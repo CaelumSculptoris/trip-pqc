@@ -54,13 +54,12 @@ def encrypt(vec, key, layers=10):
     for i in range(layers):
         scale, shift = key_to_params(key, len(vec)//2, i)
         vec = affine_coupling_layer(vec, scale, shift, invert=False)
-        vec = add_noise(vec, key)
+    vec = add_noise(vec, key)
     return vec
 
 def decrypt(vec, key, layers=10):
-    
-    for i in range(layers-1, -1, -1):
-        vec = denoise(vec, key)
+    vec = denoise(vec, key)
+    for i in range(layers-1, -1, -1):        
         scale, shift = key_to_params(key, len(vec)//2, i)
         vec = affine_coupling_layer(vec, scale, shift, invert=True)
     return vec
