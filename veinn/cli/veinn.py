@@ -4,10 +4,9 @@ VEINN CLI with seed-based hybrid public-key encryption (ephemeral INN seed)
 - Generate RSA keys
 - Encrypt with recipient public key (sender): encrypts small seed -> derive INN -> encrypt message
 - Decrypt with private key (recipient): recover seed -> derive INN -> decrypt ciphertext
-- Homomorphic ops on ciphertext JSON files (add, sub, scalar mul, avg, dot)
-Updated with OAEP padding for RSA, better metadata handling, and improved error handling.
-Further updated with potential improvements: HMAC for authentication, numeric mode support for public INN,
-stronger seed derivation via PBKDF2, enhanced error feedback, and basic batch mode via argparse.
+- Homomorphic ops on ciphertext JSON/binary files (add, sub, scalar mul, avg, dot)
+Updated with OAEP padding, HMAC for public INN, PBKDF2 seed derivation, numeric mode, and batch mode.
+Further updated with: HMAC for RSA mode, binary storage, full batch mode, nonce-based replay protection, and larger modulus support.
 """
 import os
 import sys
@@ -18,6 +17,7 @@ import hmac
 import secrets
 import numpy as np
 import argparse
+import pickle
 from typing import Callable
 
 # -----------------------------
@@ -95,7 +95,7 @@ def oaep_decode(encoded_message: bytes, k: int, label: bytes = b"", hash_func: C
 def is_probable_prime(n, k=8):
     if n < 2:
         return False
-    small_primes = [2,3,5,7,11,13,17,19,23,29]
+    small_primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29]
     for p in small_primes:
         if n % p == 0:
             return n == p
@@ -196,7 +196,7 @@ def split_blocks_flat(vec: np.ndarray, block_size: int):
     return [vec[i:i + block_size] for i in range(0, len(vec), block_size)]
 
 # -----------------------------
-# Integer coupling layer & INN
+# Integer coupling layer & INN (updated for larger modulus)
 # -----------------------------
 class IntCouplingLayer:
     def __init__(self, block_size: int, modulus: int = 256, W: np.ndarray = None):
@@ -262,10 +262,6 @@ def derive_seed_bytes(seed_str: str, dklen: int = 32):
 # Public INN derivation from known seed
 # -----------------------------
 def public_inn_from_seed(seed_str: str, block_size: int = 16, n_layers: int = 3, modulus: int = 256):
-    """
-    Deterministically generate a public INN from a seed string.
-    Anyone with the seed can derive this INN and use it to encrypt messages.
-    """
     seed_bytes = derive_seed_bytes(seed_str)
     inn, layers_flat = derive_inn_from_seed(seed_bytes, block_size, n_layers, modulus)
     print(f"Derived INN from seed '{seed_str}':")
@@ -277,10 +273,6 @@ def public_inn_from_seed(seed_str: str, block_size: int = 16, n_layers: int = 3,
 # Deterministic INN weight derivation from seed
 # -----------------------------
 def derive_inn_from_seed(seed: bytes, block_size: int, n_layers: int, modulus: int = 256):
-    """
-    Deterministically expand 'seed' into INN layers weights (list of flattened ints).
-    We derive bytes via SHA256-CTR and map each byte to 0..modulus-1.
-    """
     mid = block_size // 2
     per_layer = mid * mid
     total_bytes = per_layer * n_layers
@@ -295,18 +287,31 @@ def derive_inn_from_seed(seed: bytes, block_size: int, n_layers: int, modulus: i
     return inn, layers_flat
 
 # -----------------------------
-# Serialization helpers for ciphertexts (JSON-safe) with HMAC
+# Serialization helpers for ciphertexts (JSON and binary)
 # -----------------------------
-def write_ciphertext_json(path: str, encrypted_blocks: list, metadata: dict, enc_seed_bytes: bytes, hmac_value: str = None):
+def write_ciphertext_json(path: str, encrypted_blocks: list, metadata: dict, enc_seed_bytes: bytes, hmac_value: str = None, nonce: bytes = None):
     payload = {
         "inn_metadata": metadata,
-        "enc_seed": [int(b) for b in enc_seed_bytes],  # RSA-encrypted seed bytes as ints
+        "enc_seed": [int(b) for b in enc_seed_bytes],
         "encrypted": [[int(x) for x in blk.tolist()] for blk in encrypted_blocks]
     }
     if hmac_value:
         payload["hmac"] = hmac_value
+    if nonce:
+        payload["nonce"] = [int(b) for b in nonce]
     with open(path, "w") as f:
         json.dump(payload, f)
+
+def write_ciphertext_binary(path: str, encrypted_blocks: list, metadata: dict, enc_seed_bytes: bytes, hmac_value: str = None, nonce: bytes = None):
+    payload = {
+        "inn_metadata": metadata,
+        "enc_seed": enc_seed_bytes,
+        "encrypted": [blk.tobytes() for blk in encrypted_blocks],
+        "hmac": hmac_value,
+        "nonce": nonce
+    }
+    with open(path, "wb") as f:
+        pickle.dump(payload, f)
 
 def read_ciphertext_json(path: str):
     with open(path, "r") as f:
@@ -315,20 +320,33 @@ def read_ciphertext_json(path: str):
     metadata = payload["inn_metadata"]
     enc_blocks = [np.array([int(x) for x in blk], dtype=np.int64) for blk in payload["encrypted"]]
     hmac_value = payload.get("hmac")
-    return metadata, enc_seed, enc_blocks, hmac_value
+    nonce = bytes([int(b) for b in payload.get("nonce", [])]) if "nonce" in payload else None
+    return metadata, enc_seed, enc_blocks, hmac_value, nonce
+
+def read_ciphertext_binary(path: str):
+    with open(path, "rb") as f:
+        payload = pickle.load(f)
+    enc_seed = payload["enc_seed"]
+    metadata = payload["inn_metadata"]
+    enc_blocks = [np.frombuffer(blk, dtype=np.int64) for blk in payload["encrypted"]]
+    hmac_value = payload.get("hmac")
+    nonce = payload.get("nonce")
+    return metadata, enc_seed, enc_blocks, hmac_value, nonce
+
+def read_ciphertext(path: str):
+    if path.endswith(".json"):
+        return read_ciphertext_json(path)
+    elif path.endswith(".bin"):
+        return read_ciphertext_binary(path)
+    else:
+        raise ValueError("Unsupported file format: must be .json or .bin")
 
 # -----------------------------
-# Deterministic encryption using public INN derived from seed (with numeric support and HMAC)
+# Deterministic encryption using public INN (with numeric support, HMAC, nonce)
 # -----------------------------
-def encrypt_with_public_inn(seed_str: str, message: str = None, numbers: list = None, block_size: int = 16, n_layers: int = 3, modulus: int = 256, out_file: str = None, mode: str = "text", bytes_per_number: int = None):
-    """
-    Encrypt a message or numbers deterministically using a public INN derived from a known seed.
-    """
-    # Derive INN from seed
+def encrypt_with_public_inn(seed_str: str, message: str = None, numbers: list = None, block_size: int = 16, n_layers: int = 3, modulus: int = 256, out_file: str = None, mode: str = "text", bytes_per_number: int = None, binary: bool = False):
     inn, layers_flat = public_inn_from_seed(seed_str, block_size, n_layers, modulus)
-
     if mode == "text":
-        # Input message
         if message is None:
             message = input("Message to encrypt: ")
         data = vectorize_text(message)
@@ -340,8 +358,7 @@ def encrypt_with_public_inn(seed_str: str, message: str = None, numbers: list = 
             raw_nums = [s for s in content.replace(",", " ").split() if s != ""]
             numbers = [int(x) for x in raw_nums]
         if bytes_per_number is None:
-            bytes_per_number = int(input("Bytes per number (default 1): ").strip() or 1)
-        # pack each number to block_size (big-endian)
+            bytes_per_number = int(input("Bytes per number (default 4): ").strip() or 4)
         blocks = []
         for v in numbers:
             b = int_to_bytes_be(v, bytes_per_number)
@@ -352,83 +369,63 @@ def encrypt_with_public_inn(seed_str: str, message: str = None, numbers: list = 
             blocks.append(np.frombuffer(b, dtype=np.uint8))
     else:
         raise ValueError("Invalid mode: must be 'text' or 'numeric'")
-
-    # Encrypt blocks
-    enc_blocks = []
-    for blk in blocks:
-        enc = inn.forward(blk.astype(np.int64))
-        enc_blocks.append(enc.astype(np.int64))
-
-    # Prepare metadata (no RSA seed needed)
+    enc_blocks = [inn.forward(blk.astype(np.int64)) for blk in blocks]
+    nonce = secrets.token_bytes(16)
     metadata = {
         "block_size": block_size,
         "n_layers": n_layers,
         "modulus": modulus,
         "mode": mode,
-        "seed_str": seed_str  # store seed used for public deterministic encryption
+        "seed_str": seed_str
     }
     if mode == "numeric":
         metadata["bytes_per_number"] = bytes_per_number
-
-    # Output file
-    if out_file is None:
-        out_file = input("Output encrypted filename (default enc_pub_inn.json): ").strip() or "enc_pub_inn.json"
-
-    # Compute HMAC
     seed_bytes = derive_seed_bytes(seed_str)
     hmac_key = expand_keystream(seed_bytes + b'hmac', 32)
     temp_payload = {
         "inn_metadata": metadata,
         "enc_seed": [],
-        "encrypted": [[int(x) for x in blk.tolist()] for blk in enc_blocks]
+        "encrypted": [[int(x) for x in blk.tolist()] for blk in enc_blocks],
+        "nonce": [int(b) for b in nonce]
     }
     payload_str = json.dumps(temp_payload, sort_keys=True)
     hmac_value = hmac.new(hmac_key, payload_str.encode(), hashlib.sha256).hexdigest()
-
-    # Write JSON (no RSA seed)
-    write_ciphertext_json(out_file, enc_blocks, metadata, b'', hmac_value)
-
+    if out_file is None:
+        out_file = input("Output encrypted filename (default enc_pub_inn.json): ").strip() or "enc_pub_inn.json"
+    if binary and not out_file.endswith(".bin"):
+        out_file = out_file.replace(".json", ".bin") if out_file.endswith(".json") else out_file + ".bin"
+    if binary:
+        write_ciphertext_binary(out_file, enc_blocks, metadata, b'', hmac_value, nonce)
+    else:
+        write_ciphertext_json(out_file, enc_blocks, metadata, b'', hmac_value, nonce)
     print(f"Message encrypted deterministically with public INN -> {out_file}")
     return out_file
 
 # -----------------------------
-# Decrypt with public INN (with numeric support, HMAC verification, and better error feedback)
+# Decrypt with public INN (with numeric support, HMAC, nonce)
 # -----------------------------
 def decrypt_with_public_inn(seed_str: str, enc_file: str):
-    """
-    Decrypt a message encrypted with a public INN using the shared seed string.
-    """
-    # Read encrypted file
-    metadata, enc_seed, enc_blocks, hmac_value = read_ciphertext_json(enc_file)
+    metadata, enc_seed, enc_blocks, hmac_value, nonce = read_ciphertext(enc_file)
     if enc_seed:
         raise ValueError("File was not encrypted with public INN (contains RSA seed)")
-
-    # Verify HMAC
     seed_bytes = derive_seed_bytes(seed_str)
     hmac_key = expand_keystream(seed_bytes + b'hmac', 32)
     temp_payload = {
         "inn_metadata": metadata,
         "enc_seed": [],
-        "encrypted": [[int(x) for x in blk.tolist()] for blk in enc_blocks]
+        "encrypted": [[int(x) for x in blk.tolist()] for blk in enc_blocks],
+        "nonce": [int(b) for b in nonce] if nonce else []
     }
     payload_str = json.dumps(temp_payload, sort_keys=True)
     computed_hmac = hmac.new(hmac_key, payload_str.encode(), hashlib.sha256).hexdigest()
     if hmac_value != computed_hmac:
-        raise ValueError("HMAC verification failed: Possibly tampered file or wrong seed")
-
-    # Derive INN from seed
+        raise ValueError("HMAC verification failed: Possibly tampered file, wrong seed, or invalid nonce")
     block_size = int(metadata["block_size"])
     n_layers = int(metadata["n_layers"])
     modulus = int(metadata["modulus"])
     inn, layers_flat = derive_inn_from_seed(seed_bytes, block_size, n_layers, modulus)
-
-    # Decrypt blocks
-    decrypted_blocks = []
-    for blk in enc_blocks:
-        dec = inn.reverse(blk.astype(np.int64)).astype(np.uint8)
-        decrypted_blocks.append(dec)
+    decrypted_blocks = [inn.reverse(blk.astype(np.int64)).astype(np.uint8) for blk in enc_blocks]
     flat = np.concatenate(decrypted_blocks).astype(np.uint8)
-
     mode = metadata.get("mode", "text")
     try:
         if mode == "text":
@@ -438,7 +435,7 @@ def decrypt_with_public_inn(seed_str: str, enc_file: str):
             print(text)
             return text
         elif mode == "numeric":
-            bytes_per_number = int(metadata.get("bytes_per_number", block_size))
+            bytes_per_number = int(metadata.get("bytes_per_number", 4))
             nums = []
             for dec_blk in decrypted_blocks:
                 b = dec_blk.tobytes()[-bytes_per_number:]
@@ -455,25 +452,21 @@ def decrypt_with_public_inn(seed_str: str, enc_file: str):
         raise
 
 # -----------------------------
-# Homomorphic helpers (operate on ciphertext JSON files)
+# Homomorphic helpers (updated for larger modulus)
 # -----------------------------
 def _load_encrypted_file(enc_file: str):
-    with open(enc_file, "r") as f:
-        payload = json.load(f)
-    enc_blocks = [np.array([int(x) for x in blk], dtype=np.int64) for blk in payload["encrypted"]]
-    meta = payload["inn_metadata"]
-    # ensure types
+    metadata, enc_seed, enc_blocks, hmac_value, nonce = read_ciphertext(enc_file)
     meta_parsed = {
-        "block_size": int(meta["block_size"]),
-        "n_layers": int(meta["n_layers"]),
-        "modulus": int(meta["modulus"]),
-        "seed_len": int(meta.get("seed_len", 32)),
-        "mode": meta.get("mode", "raw"),
-        "bytes_per_number": int(meta.get("bytes_per_number", meta["block_size"]))
+        "block_size": int(metadata["block_size"]),
+        "n_layers": int(metadata["n_layers"]),
+        "modulus": int(metadata["modulus"]),
+        "seed_len": int(metadata.get("seed_len", 32)),
+        "mode": metadata.get("mode", "raw"),
+        "bytes_per_number": int(metadata.get("bytes_per_number", metadata.get("block_size", 4)))
     }
-    return enc_blocks, meta_parsed, payload
+    return enc_blocks, meta_parsed, hmac_value, nonce
 
-def _write_encrypted_payload(out_file: str, enc_blocks, meta, extra_fields=None):
+def _write_encrypted_payload(out_file: str, enc_blocks, meta, binary: bool = False, hmac_value: str = None, nonce: bytes = None):
     out = {
         "inn_metadata": {
             "block_size": int(meta["block_size"]),
@@ -483,50 +476,58 @@ def _write_encrypted_payload(out_file: str, enc_blocks, meta, extra_fields=None)
             "mode": meta.get("mode", "raw"),
             "bytes_per_number": int(meta.get("bytes_per_number", meta["block_size"]))
         },
-        "enc_seed": [],  # placeholder: homomorphic outputs don't include seed
+        "enc_seed": [],
         "encrypted": [[int(x) for x in blk.tolist()] for blk in enc_blocks]
     }
-    if extra_fields:
-        out.update(extra_fields)
-    with open(out_file, "w") as f:
-        json.dump(out, f)
+    if hmac_value:
+        out["hmac"] = hmac_value
+    if nonce:
+        out["nonce"] = [int(b) for b in nonce]
+    if binary:
+        if not out_file.endswith(".bin"):
+            out_file = out_file.replace(".json", ".bin") if out_file.endswith(".json") else out_file + ".bin"
+        with open(out_file, "wb") as f:
+            pickle.dump(out, f)
+    else:
+        with open(out_file, "w") as f:
+            json.dump(out, f)
 
-def homomorphic_add_files(f1: str, f2: str, out_file: str):
-    enc1, meta1, _ = _load_encrypted_file(f1)
-    enc2, meta2, _ = _load_encrypted_file(f2)
+def homomorphic_add_files(f1: str, f2: str, out_file: str, binary: bool = False):
+    enc1, meta1, _, _ = _load_encrypted_file(f1)
+    enc2, meta2, _, _ = _load_encrypted_file(f2)
     if meta1 != meta2:
-        raise ValueError("Encrypted files metadata mismatch (block_size/n_layers/modulus). They must match.")
+        raise ValueError("Encrypted files metadata mismatch")
     if len(enc1) != len(enc2):
         raise ValueError("Encrypted files must have same number of blocks")
     modulus = meta1["modulus"]
     summed = [((a + b) % modulus).astype(np.int64) for a, b in zip(enc1, enc2)]
-    _write_encrypted_payload(out_file, summed, meta1)
+    _write_encrypted_payload(out_file, summed, meta1, binary)
     print(f"Homomorphic sum saved to {out_file}")
 
-def homomorphic_sub_files(f1: str, f2: str, out_file: str):
-    enc1, meta1, _ = _load_encrypted_file(f1)
-    enc2, meta2, _ = _load_encrypted_file(f2)
+def homomorphic_sub_files(f1: str, f2: str, out_file: str, binary: bool = False):
+    enc1, meta1, _, _ = _load_encrypted_file(f1)
+    enc2, meta2, _, _ = _load_encrypted_file(f2)
     if meta1 != meta2:
         raise ValueError("Encrypted files metadata mismatch")
     if len(enc1) != len(enc2):
         raise ValueError("Encrypted files must have same number of blocks")
     modulus = meta1["modulus"]
     diff = [((a - b) % modulus).astype(np.int64) for a, b in zip(enc1, enc2)]
-    _write_encrypted_payload(out_file, diff, meta1)
+    _write_encrypted_payload(out_file, diff, meta1, binary)
     print(f"Homomorphic difference saved to {out_file}")
 
-def homomorphic_scalar_mul_file(f: str, scalar: int, out_file: str):
-    enc, meta, _ = _load_encrypted_file(f)
+def homomorphic_scalar_mul_file(f: str, scalar: int, out_file: str, binary: bool = False):
+    enc, meta, _, _ = _load_encrypted_file(f)
     modulus = meta["modulus"]
     prod = [((blk * int(scalar)) % modulus).astype(np.int64) for blk in enc]
-    _write_encrypted_payload(out_file, prod, meta)
+    _write_encrypted_payload(out_file, prod, meta, binary)
     print(f"Homomorphic scalar multiplication saved to {out_file}")
 
-def homomorphic_average_files(files: list, out_file: str):
+def homomorphic_average_files(files: list, out_file: str, binary: bool = False):
     encs = []
     metas = []
     for f in files:
-        enc_blocks, meta, _ = _load_encrypted_file(f)
+        enc_blocks, meta, _, _ = _load_encrypted_file(f)
         encs.append(enc_blocks)
         metas.append(meta)
     if not all(m == metas[0] for m in metas):
@@ -542,12 +543,12 @@ def homomorphic_average_files(files: list, out_file: str):
             s = (s + enc[i].astype(np.int64)) % (modulus * n)
         avg = ((s // n) % modulus).astype(np.int64)
         avg_blocks.append(avg)
-    _write_encrypted_payload(out_file, avg_blocks, meta)
+    _write_encrypted_payload(out_file, avg_blocks, meta, binary)
     print(f"Homomorphic average saved to {out_file}")
 
-def homomorphic_dot_files(f1: str, f2: str, out_file: str):
-    enc1, meta1, _ = _load_encrypted_file(f1)
-    enc2, meta2, _ = _load_encrypted_file(f2)
+def homomorphic_dot_files(f1: str, f2: str, out_file: str, binary: bool = False):
+    enc1, meta1, _, _ = _load_encrypted_file(f1)
+    enc2, meta2, _, _ = _load_encrypted_file(f2)
     if meta1 != meta2:
         raise ValueError("Encrypted files metadata mismatch")
     if len(enc1) != len(enc2):
@@ -559,19 +560,22 @@ def homomorphic_dot_files(f1: str, f2: str, out_file: str):
         raise ValueError("Encrypted files flatten to different lengths")
     dot = int(np.dot(flat1 % modulus, flat2 % modulus) % modulus)
     result = {"dot_product": dot}
-    with open(out_file, "w") as f:
-        json.dump(result, f)
+    if binary:
+        if not out_file.endswith(".bin"):
+            out_file = out_file.replace(".json", ".bin") if out_file.endswith(".json") else out_file + ".bin"
+        with open(out_file, "wb") as f:
+            pickle.dump(result, f)
+    else:
+        with open(out_file, "w") as f:
+            json.dump(result, f)
     print(f"Homomorphic dot product saved to {out_file}")
 
 # -----------------------------
-# Public-key hybrid encrypt / decrypt (seed-based with OAEP)
+# Public-key hybrid encrypt / decrypt (with HMAC, nonce, binary support)
 # -----------------------------
-def generate_rsa_cli():
-    bits = int(input("RSA key size in bits (default 2048): ").strip() or 2048)
+def generate_rsa_cli(bits: int = 2048, pubfile: str = "rsa_pub.json", privfile: str = "rsa_priv.json"):
     print("Generating RSA keypair (may take time)...")
     kp = generate_rsa_keypair(bits=bits)
-    pubfile = input("Public key filename (default rsa_pub.json): ").strip() or "rsa_pub.json"
-    privfile = input("Private key filename (default rsa_priv.json): ").strip() or "rsa_priv.json"
     pub = {"n": kp["n"], "e": kp["e"]}
     priv = {"n": kp["n"], "d": kp["d"]}
     with open(pubfile, "w") as f:
@@ -582,7 +586,7 @@ def generate_rsa_cli():
     print(f"RSA private key -> {privfile} (KEEP SECRET)")
     return pubfile, privfile
 
-def encrypt_with_pub(pubfile: str, in_path: str = None):
+def encrypt_with_pub(pubfile: str, in_path: str = None, message: str = None, numbers: list = None, mode: str = "text", block_size: int = 16, n_layers: int = 3, modulus: int = 256, seed_len: int = 32, out_file: str = None, binary: bool = False):
     if not os.path.exists(pubfile):
         raise FileNotFoundError("RSA public key file not found")
     with open(pubfile, "r") as f:
@@ -590,74 +594,68 @@ def encrypt_with_pub(pubfile: str, in_path: str = None):
     n = int(pub["n"])
     e = int(pub["e"])
     k = (n.bit_length() + 7) // 8
-
-    # input message
-    mode_choice = input("Encrypt mode: (t)ext or (n)umeric? [t]: ").strip().lower() or "t"
-    block_size = int(input("INN block_size to use (even, default 16): ").strip() or 16)
-    if block_size % 2 != 0:
-        raise ValueError("block_size must be even")
-    n_layers = int(input("INN n_layers (default 3): ").strip() or 3)
-    modulus = int(input("modulus (default 256): ").strip() or 256)
-    seed_len = int(input("ephemeral seed length in bytes (default 32): ").strip() or 32)
-
-    if mode_choice == "t":
-        if in_path:
-            with open(in_path, "r", encoding="utf-8") as f:
-                text = f.read()
+    if in_path and message is None and numbers is None:
+        with open(in_path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+        if mode == "text":
+            message = content
         else:
-            text = input("Message to encrypt: ")
-        data = vectorize_text(text)
+            raw_nums = [s for s in content.replace(",", " ").split() if s != ""]
+            numbers = [int(x) for x in raw_nums]
+    if mode == "text":
+        if message is None:
+            message = input("Message to encrypt: ")
+        data = vectorize_text(message)
         padded = pkcs7_pad(data, block_size)
         blocks = split_blocks_flat(padded, block_size)
         bytes_per_number = None
     else:
-        bytes_per_number = int(input("Bytes per number (default 1): ").strip() or 1)
-        if in_path:
-            with open(in_path, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-        else:
+        if numbers is None:
             content = input("Enter numbers (comma or whitespace separated): ").strip()
-        raw_nums = [s for s in content.replace(",", " ").split() if s != ""]
-        nums = [int(x) for x in raw_nums]
-        # pack each number to block_size (big-endian)
+            raw_nums = [s for s in content.replace(",", " ").split() if s != ""]
+            numbers = [int(x) for x in raw_nums]
+        bytes_per_number = int(input("Bytes per number (default 4): ").strip() or 4)
         blocks = []
-        for v in nums:
+        for v in numbers:
             b = int_to_bytes_be(v, bytes_per_number)
             if len(b) > block_size:
                 raise ValueError("Number too large for block_size")
             if len(b) < block_size:
                 b = (b"\x00" * (block_size - len(b))) + b
             blocks.append(np.frombuffer(b, dtype=np.uint8))
-
-    # generate ephemeral seed
     seed = secrets.token_bytes(seed_len)
-
-    # derive INN from seed
     inn, layers_flat = derive_inn_from_seed(seed, block_size, n_layers, modulus)
-
-    # encrypt blocks
-    enc_blocks = []
-    for blk in blocks:
-        enc = inn.forward(blk.astype(np.int64))
-        enc_blocks.append(enc.astype(np.int64))
-
-    # RSA-encrypt seed with OAEP
+    enc_blocks = [inn.forward(blk.astype(np.int64)) for blk in blocks]
     padded_seed = oaep_encode(seed, k, hash_func=sha256)
     enc_seed_int = pow(bytes_be_to_int(padded_seed), e, n)
     enc_seed_bytes = int_to_bytes_be(enc_seed_int, k)
-
-    # write JSON
+    nonce = secrets.token_bytes(16)
     metadata = {
         "block_size": block_size,
         "n_layers": n_layers,
         "modulus": modulus,
         "seed_len": seed_len,
-        "mode": "text" if mode_choice == "t" else "numeric"
+        "mode": mode
     }
-    if mode_choice == "n":
+    if mode == "numeric":
         metadata["bytes_per_number"] = bytes_per_number
-    out_file = input("Output encrypted filename (default enc_pub.json): ").strip() or "enc_pub.json"
-    write_ciphertext_json(out_file, enc_blocks, metadata, enc_seed_bytes)
+    hmac_key = expand_keystream(seed + b'hmac', 32)
+    temp_payload = {
+        "inn_metadata": metadata,
+        "enc_seed": [int(b) for b in enc_seed_bytes],
+        "encrypted": [[int(x) for x in blk.tolist()] for blk in enc_blocks],
+        "nonce": [int(b) for b in nonce]
+    }
+    payload_str = json.dumps(temp_payload, sort_keys=True)
+    hmac_value = hmac.new(hmac_key, payload_str.encode(), hashlib.sha256).hexdigest()
+    if out_file is None:
+        out_file = input("Output encrypted filename (default enc_pub.json): ").strip() or "enc_pub.json"
+    if binary and not out_file.endswith(".bin"):
+        out_file = out_file.replace(".json", ".bin") if out_file.endswith(".json") else out_file + ".bin"
+    if binary:
+        write_ciphertext_binary(out_file, enc_blocks, metadata, enc_seed_bytes, hmac_value, nonce)
+    else:
+        write_ciphertext_json(out_file, enc_blocks, metadata, enc_seed_bytes, hmac_value, nonce)
     print(f"Encrypted message (with RSA-encrypted seed) saved to {out_file}")
     return out_file
 
@@ -669,25 +667,27 @@ def decrypt_with_priv(keysfile: str, privfile: str, enc_file: str):
     d = int(priv["d"])
     n = int(priv["n"])
     k = (n.bit_length() + 7) // 8
-
-    metadata, enc_seed_bytes, enc_blocks, hmac_value = read_ciphertext_json(enc_file)
-    # RSA-decrypt enc_seed with OAEP
+    metadata, enc_seed_bytes, enc_blocks, hmac_value, nonce = read_ciphertext(enc_file)
+    hmac_key = expand_keystream(oaep_decode(int_to_bytes_be(pow(bytes_be_to_int(enc_seed_bytes), d, n), k), k, hash_func=sha256) + b'hmac', 32)
+    temp_payload = {
+        "inn_metadata": metadata,
+        "enc_seed": [int(b) for b in enc_seed_bytes],
+        "encrypted": [[int(x) for x in blk.tolist()] for blk in enc_blocks],
+        "nonce": [int(b) for b in nonce] if nonce else []
+    }
+    payload_str = json.dumps(temp_payload, sort_keys=True)
+    computed_hmac = hmac.new(hmac_key, payload_str.encode(), hashlib.sha256).hexdigest()
+    if hmac_value != computed_hmac:
+        raise ValueError("HMAC verification failed: Possibly tampered file or wrong private key")
     enc_seed_int = bytes_be_to_int(enc_seed_bytes)
     dec_padded_int = pow(enc_seed_int, d, n)
     dec_padded = int_to_bytes_be(dec_padded_int, k)
     seed_bytes = oaep_decode(dec_padded, k, hash_func=sha256)
-
-    # derive INN from seed
     block_size = int(metadata["block_size"])
     n_layers = int(metadata["n_layers"])
     modulus = int(metadata["modulus"])
     inn, layers_flat = derive_inn_from_seed(seed_bytes, block_size, n_layers, modulus)
-
-    # decrypt
-    decrypted_blocks = []
-    for blk in enc_blocks:
-        dec = inn.reverse(blk.astype(np.int64)).astype(np.uint8)
-        decrypted_blocks.append(dec)
+    decrypted_blocks = [inn.reverse(blk.astype(np.int64)).astype(np.uint8) for blk in enc_blocks]
     flat = np.concatenate(decrypted_blocks).astype(np.uint8)
     mode = metadata.get("mode", "text")
     try:
@@ -696,8 +696,8 @@ def decrypt_with_priv(keysfile: str, privfile: str, enc_file: str):
             text = devectorize_text(unpadded)
             print("Decrypted (text):")
             print(text)
-        else:  # numeric
-            bytes_per_number = int(metadata.get("bytes_per_number", block_size))
+        else:
+            bytes_per_number = int(metadata.get("bytes_per_number", 4))
             nums = []
             for dec_blk in decrypted_blocks:
                 b = dec_blk.tobytes()[-bytes_per_number:]
@@ -711,145 +711,243 @@ def decrypt_with_priv(keysfile: str, privfile: str, enc_file: str):
         raise
 
 # -----------------------------
-# CLI main with batch mode support via argparse
+# CLI main with full batch mode support
 # -----------------------------
 def main():
     parser = argparse.ArgumentParser(description="VEINN CLI")
     subparsers = parser.add_subparsers(dest="command")
 
-    # Public encrypt parser
+    # RSA key generation
+    rsa_parser = subparsers.add_parser("generate_rsa", help="Generate RSA keypair")
+    rsa_parser.add_argument("--bits", type=int, default=2048, help="RSA key size in bits")
+    rsa_parser.add_argument("--pubfile", default="rsa_pub.json", help="Public key output file")
+    rsa_parser.add_argument("--privfile", default="rsa_priv.json", help="Private key output file")
+
+    # Public encrypt
     pub_enc_parser = subparsers.add_parser("public_encrypt", help="Encrypt with public INN")
     pub_enc_parser.add_argument("--seed", required=True, help="Public seed string")
     pub_enc_parser.add_argument("--message", help="Message to encrypt (text mode)")
     pub_enc_parser.add_argument("--numbers", nargs="+", type=int, help="Numbers to encrypt (numeric mode)")
     pub_enc_parser.add_argument("--mode", default="text", choices=["text", "numeric"], help="Mode: text or numeric")
-    pub_enc_parser.add_argument("--bytes_per_number", type=int, help="Bytes per number (numeric mode)")
+    pub_enc_parser.add_argument("--bytes_per_number", type=int, default=4, help="Bytes per number (numeric mode)")
     pub_enc_parser.add_argument("--block_size", type=int, default=16, help="Block size (even)")
     pub_enc_parser.add_argument("--n_layers", type=int, default=3, help="Number of layers")
     pub_enc_parser.add_argument("--modulus", type=int, default=256, help="Modulus")
     pub_enc_parser.add_argument("--out_file", default="enc_pub_inn.json", help="Output file")
+    pub_enc_parser.add_argument("--binary", action="store_true", help="Use binary output format")
 
-    # Public decrypt parser
+    # Public decrypt
     pub_dec_parser = subparsers.add_parser("public_decrypt", help="Decrypt with public INN")
     pub_dec_parser.add_argument("--seed", required=True, help="Public seed string")
     pub_dec_parser.add_argument("--enc_file", default="enc_pub_inn.json", help="Encrypted file")
 
-    args = parser.parse_known_args()[0]  # Parse known to allow interactive fallback
+    # RSA encrypt
+    rsa_enc_parser = subparsers.add_parser("rsa_encrypt", help="Encrypt with RSA public key")
+    rsa_enc_parser.add_argument("--pubfile", default="rsa_pub.json", help="RSA public key file")
+    rsa_enc_parser.add_argument("--in_path", help="Input file path")
+    rsa_enc_parser.add_argument("--message", help="Message to encrypt (text mode)")
+    rsa_enc_parser.add_argument("--numbers", nargs="+", type=int, help="Numbers to encrypt (numeric mode)")
+    rsa_enc_parser.add_argument("--mode", default="text", choices=["text", "numeric"], help="Mode: text or numeric")
+    rsa_enc_parser.add_argument("--bytes_per_number", type=int, default=4, help="Bytes per number (numeric mode)")
+    rsa_enc_parser.add_argument("--block_size", type=int, default=16, help="Block size (even)")
+    rsa_enc_parser.add_argument("--n_layers", type=int, default=3, help="Number of layers")
+    rsa_enc_parser.add_argument("--modulus", type=int, default=256, help="Modulus")
+    rsa_enc_parser.add_argument("--seed_len", type=int, default=32, help="Ephemeral seed length")
+    rsa_enc_parser.add_argument("--out_file", default="enc_pub.json", help="Output file")
+    rsa_enc_parser.add_argument("--binary", action="store_true", help="Use binary output format")
 
-    if args.command == "public_encrypt":
-        encrypt_with_public_inn(args.seed, args.message, args.numbers, args.block_size, args.n_layers, args.modulus, args.out_file, args.mode, args.bytes_per_number)
-        return
-    elif args.command == "public_decrypt":
-        decrypt_with_public_inn(args.seed, args.enc_file)
-        return
+    # RSA decrypt
+    rsa_dec_parser = subparsers.add_parser("rsa_decrypt", help="Decrypt with RSA private key")
+    rsa_dec_parser.add_argument("--privfile", default="rsa_priv.json", help="RSA private key file")
+    rsa_dec_parser.add_argument("--enc_file", default="enc_pub.json", help="Encrypted file")
 
-    # Interactive mode if no args
-    print("VEINN CLI — seed-based public-key hybrid (ephemeral INN seed) + homomorphic ops")
-    while True:
-        print("")
-        print("1) Generate RSA keypair (public/private)")
-        print("2) Encrypt with recipient public key (seed-based ephemeral INN)")
-        print("3) Decrypt with private key")
-        print("4) Homomorphic add (file1, file2 -> out)")
-        print("5) Homomorphic subtract (file1, file2 -> out)")
-        print("6) Homomorphic scalar multiply (file, scalar -> out)")
-        print("7) Homomorphic average (file1,file2,... -> out)")
-        print("8) Homomorphic dot product (file1, file2 -> out)")
-        print("9) Derive public INN from seed (deterministic encryption without private key)")
-        print("10) Encrypt deterministically using public INN (seed-based, no private key)")
-        print("11) Decrypt deterministically using public INN (seed-based, no private key)")
-        print("0) Exit")
-        choice = input("Choice: ").strip()
+    # Homomorphic operations
+    hom_add_parser = subparsers.add_parser("hom_add", help="Homomorphic addition")
+    hom_add_parser.add_argument("--file1", required=True, help="First encrypted file")
+    hom_add_parser.add_argument("--file2", required=True, help="Second encrypted file")
+    hom_add_parser.add_argument("--out_file", default="hom_add.json", help="Output file")
+    hom_add_parser.add_argument("--binary", action="store_true", help="Use binary output format")
 
-        try:
-            if choice == "0":
-                break
-            elif choice == "1":
-                generate_rsa_cli()
-            elif choice == "2":
-                pubfile = input("Recipient RSA public key file (default rsa_pub.json): ").strip() or "rsa_pub.json"
-                if not os.path.exists(pubfile):
-                    print("Public key not found. Generate RSA keys first.")
-                    continue
-                inpath = input("Optional input file path (blank = prompt): ").strip() or None
-                encrypt_with_pub(pubfile, in_path=inpath)
-            elif choice == "3":
-                privfile = input("Your RSA private key file (default rsa_priv.json): ").strip() or "rsa_priv.json"
-                encfile = input("Encrypted file to decrypt (default enc_pub.json): ").strip() or "enc_pub.json"
-                if not os.path.exists(privfile):
-                    print("Private key not found.")
-                    continue
-                if not os.path.exists(encfile):
-                    print("Encrypted file not found.")
-                    continue
-                decrypt_with_priv(None, privfile, encfile)
-            elif choice == "4":
-                f1 = input("Encrypted file 1: ").strip()
-                f2 = input("Encrypted file 2: ").strip()
-                out = input("Output filename (default hom_add.json): ").strip() or "hom_add.json"
-                homomorphic_add_files(f1, f2, out)
-            elif choice == "5":
-                f1 = input("Encrypted file 1: ").strip()
-                f2 = input("Encrypted file 2: ").strip()
-                out = input("Output filename (default hom_sub.json): ").strip() or "hom_sub.json"
-                homomorphic_sub_files(f1, f2, out)
-            elif choice == "6":
-                f = input("Encrypted file: ").strip()
-                scalar = int(input("Scalar (integer): ").strip())
-                out = input("Output filename (default hom_mul.json): ").strip() or "hom_mul.json"
-                homomorphic_scalar_mul_file(f, scalar, out)
-            elif choice == "7":
-                files = input("Comma-separated encrypted files to average: ").strip().split(",")
-                files = [s.strip() for s in files if s.strip()]
-                out = input("Output filename (default hom_avg.json): ").strip() or "hom_avg.json"
-                homomorphic_average_files(files, out)
-            elif choice == "8":
-                f1 = input("Encrypted file 1: ").strip()
-                f2 = input("Encrypted file 2: ").strip()
-                out = input("Output filename (default hom_dot.json): ").strip() or "hom_dot.json"
-                homomorphic_dot_files(f1, f2, out)
-            elif choice == "9":
-                seed_input = input("Enter seed string (publicly shared): ").strip()
-                block_size = int(input("Block size (even, default 16): ").strip() or 16)
-                if block_size % 2 != 0:
-                    print("Block size must be even")
-                    continue
-                n_layers = int(input("Number of INN layers (default 3): ").strip() or 3)
-                modulus = int(input("Modulus (default 256): ").strip() or 256)
-                inn, layers_flat = public_inn_from_seed(seed_input, block_size, n_layers, modulus)
-                print("Public INN derived and ready for deterministic encryption.")
-            elif choice == "10":
-                seed_input = input("Enter public seed string: ").strip()
-                mode_choice = input("Mode: (t)ext or (n)umeric? [t]: ").strip().lower() or "t"
-                message = None
-                numbers = None
-                bytes_per_number = None
-                if mode_choice == "t":
-                    message = input("Message to encrypt: ")
-                else:
-                    content = input("Enter numbers (comma or whitespace separated): ").strip()
-                    raw_nums = [s for s in content.replace(",", " ").split() if s != ""]
-                    numbers = [int(x) for x in raw_nums]
-                    bytes_per_number = int(input("Bytes per number (default 1): ").strip() or 1)
-                block_size = int(input("Block size (even, default 16): ").strip() or 16)
-                if block_size % 2 != 0:
-                    print("Block size must be even")
-                    continue
-                n_layers = int(input("Number of INN layers (default 3): ").strip() or 3)
-                modulus = int(input("Modulus (default 256): ").strip() or 256)
-                out_file = input("Output encrypted filename (default enc_pub_inn.json): ").strip() or "enc_pub_inn.json"
-                encrypt_with_public_inn(seed_input, message, numbers, block_size, n_layers, modulus, out_file, mode_choice, bytes_per_number)
-            elif choice == "11":
-                seed_input = input("Enter public seed string: ").strip()
-                enc_file = input("Encrypted file to decrypt (default enc_pub_inn.json): ").strip() or "enc_pub_inn.json"
-                if not os.path.exists(enc_file):
-                    print("Encrypted file not found.")
-                    continue
-                decrypt_with_public_inn(seed_input, enc_file)
-            else:
-                print("Invalid choice")
-        except Exception as e:
-            print("ERROR:", e)
+    hom_sub_parser = subparsers.add_parser("hom_sub", help="Homomorphic subtraction")
+    hom_sub_parser.add_argument("--file1", required=True, help="First encrypted file")
+    hom_sub_parser.add_argument("--file2", required=True, help="Second encrypted file")
+    hom_sub_parser.add_argument("--out_file", default="hom_sub.json", help="Output file")
+    hom_sub_parser.add_argument("--binary", action="store_true", help="Use binary output format")
+
+    hom_mul_parser = subparsers.add_parser("hom_scalar_mul", help="Homomorphic scalar multiplication")
+    hom_mul_parser.add_argument("--file", required=True, help="Encrypted file")
+    hom_mul_parser.add_argument("--scalar", type=int, required=True, help="Scalar integer")
+    hom_mul_parser.add_argument("--out_file", default="hom_mul.json", help="Output file")
+    hom_mul_parser.add_argument("--binary", action="store_true", help="Use binary output format")
+
+    hom_avg_parser = subparsers.add_parser("hom_avg", help="Homomorphic average")
+    hom_avg_parser.add_argument("--files", nargs="+", required=True, help="Encrypted files")
+    hom_avg_parser.add_argument("--out_file", default="hom_avg.json", help="Output file")
+    hom_avg_parser.add_argument("--binary", action="store_true", help="Use binary output format")
+
+    hom_dot_parser = subparsers.add_parser("hom_dot", help="Homomorphic dot product")
+    hom_dot_parser.add_argument("--file1", required=True, help="First encrypted file")
+    hom_dot_parser.add_argument("--file2", required=True, help="Second encrypted file")
+    hom_dot_parser.add_argument("--out_file", default="hom_dot.json", help="Output file")
+    hom_dot_parser.add_argument("--binary", action="store_true", help="Use binary output format")
+
+    # Public INN derivation
+    pub_inn_parser = subparsers.add_parser("public_inn", help="Derive public INN from seed")
+    pub_inn_parser.add_argument("--seed", required=True, help="Public seed string")
+    pub_inn_parser.add_argument("--block_size", type=int, default=16, help="Block size (even)")
+    pub_inn_parser.add_argument("--n_layers", type=int, default=3, help="Number of layers")
+    pub_inn_parser.add_argument("--modulus", type=int, default=256, help="Modulus")
+
+    args = parser.parse_known_args()[0]
+
+    try:
+        if args.command == "generate_rsa":
+            generate_rsa_cli(args.bits, args.pubfile, args.privfile)
+        elif args.command == "public_encrypt":
+            encrypt_with_public_inn(args.seed, args.message, args.numbers, args.block_size, args.n_layers, args.modulus, args.out_file, args.mode, args.bytes_per_number, args.binary)
+        elif args.command == "public_decrypt":
+            decrypt_with_public_inn(args.seed, args.enc_file)
+        elif args.command == "rsa_encrypt":
+            encrypt_with_pub(args.pubfile, args.in_path, args.message, args.numbers, args.mode, args.block_size, args.n_layers, args.modulus, args.seed_len, args.out_file, args.binary)
+        elif args.command == "rsa_decrypt":
+            decrypt_with_priv(None, args.privfile, args.enc_file)
+        elif args.command == "hom_add":
+            homomorphic_add_files(args.file1, args.file2, args.out_file, args.binary)
+        elif args.command == "hom_sub":
+            homomorphic_sub_files(args.file1, args.file2, args.out_file, args.binary)
+        elif args.command == "hom_scalar_mul":
+            homomorphic_scalar_mul_file(args.file, args.scalar, args.out_file, args.binary)
+        elif args.command == "hom_avg":
+            homomorphic_average_files(args.files, args.out_file, args.binary)
+        elif args.command == "hom_dot":
+            homomorphic_dot_files(args.file1, args.file2, args.out_file, args.binary)
+        elif args.command == "public_inn":
+            public_inn_from_seed(args.seed, args.block_size, args.n_layers, args.modulus)
+        else:
+            # Interactive mode
+            print("VEINN CLI — seed-based public-key hybrid (ephemeral INN seed) + homomorphic ops")
+            while True:
+                print("")
+                print("1) Generate RSA keypair (public/private)")
+                print("2) Encrypt with recipient public key (seed-based ephemeral INN)")
+                print("3) Decrypt with private key")
+                print("4) Homomorphic add (file1, file2 -> out)")
+                print("5) Homomorphic subtract (file1, file2 -> out)")
+                print("6) Homomorphic scalar multiply (file, scalar -> out)")
+                print("7) Homomorphic average (file1,file2,... -> out)")
+                print("8) Homomorphic dot product (file1, file2 -> out)")
+                print("9) Derive public INN from seed (deterministic encryption without private key)")
+                print("10) Encrypt deterministically using public INN (seed-based, no private key)")
+                print("11) Decrypt deterministically using public INN (seed-based, no private key)")
+                print("0) Exit")
+                choice = input("Choice: ").strip()
+
+                try:
+                    if choice == "0":
+                        break
+                    elif choice == "1":
+                        bits = int(input("RSA key size in bits (default 2048): ").strip() or 2048)
+                        pubfile = input("Public key filename (default rsa_pub.json): ").strip() or "rsa_pub.json"
+                        privfile = input("Private key filename (default rsa_priv.json): ").strip() or "rsa_priv.json"
+                        generate_rsa_cli(bits, pubfile, privfile)
+                    elif choice == "2":
+                        pubfile = input("Recipient RSA public key file (default rsa_pub.json): ").strip() or "rsa_pub.json"
+                        if not os.path.exists(pubfile):
+                            print("Public key not found. Generate RSA keys first.")
+                            continue
+                        inpath = input("Optional input file path (blank = prompt): ").strip() or None
+                        mode = input("Mode: (t)ext or (n)umeric? [t]: ").strip().lower() or "text"
+                        block_size = int(input("Block size (even, default 16): ").strip() or 16)
+                        if block_size % 2 != 0:
+                            print("Block size must be even")
+                            continue
+                        n_layers = int(input("Number of layers (default 3): ").strip() or 3)
+                        modulus = int(input("Modulus (default 256): ").strip() or 256)
+                        seed_len = int(input("Seed length (default 32): ").strip() or 32)
+                        binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y"
+                        encrypt_with_pub(pubfile, in_path=inpath, mode=mode, block_size=block_size, n_layers=n_layers, modulus=modulus, seed_len=seed_len, binary=binary)
+                    elif choice == "3":
+                        privfile = input("RSA private key file (default rsa_priv.json): ").strip() or "rsa_priv.json"
+                        encfile = input("Encrypted file to decrypt (default enc_pub.json): ").strip() or "enc_pub.json"
+                        if not os.path.exists(privfile) or not os.path.exists(encfile):
+                            print("File not found.")
+                            continue
+                        decrypt_with_priv(None, privfile, encfile)
+                    elif choice == "4":
+                        f1 = input("Encrypted file 1: ").strip()
+                        f2 = input("Encrypted file 2: ").strip()
+                        out = input("Output filename (default hom_add.json): ").strip() or "hom_add.json"
+                        binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y"
+                        homomorphic_add_files(f1, f2, out, binary)
+                    elif choice == "5":
+                        f1 = input("Encrypted file 1: ").strip()
+                        f2 = input("Encrypted file 2: ").strip()
+                        out = input("Output filename (default hom_sub.json): ").strip() or "hom_sub.json"
+                        binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y"
+                        homomorphic_sub_files(f1, f2, out, binary)
+                    elif choice == "6":
+                        f = input("Encrypted file: ").strip()
+                        scalar = int(input("Scalar (integer): ").strip())
+                        out = input("Output filename (default hom_mul.json): ").strip() or "hom_mul.json"
+                        binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y"
+                        homomorphic_scalar_mul_file(f, scalar, out, binary)
+                    elif choice == "7":
+                        files = input("Comma-separated encrypted files to average: ").strip().split(",")
+                        files = [s.strip() for s in files if s.strip()]
+                        out = input("Output filename (default hom_avg.json): ").strip() or "hom_avg.json"
+                        binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y"
+                        homomorphic_average_files(files, out, binary)
+                    elif choice == "8":
+                        f1 = input("Encrypted file 1: ").strip()
+                        f2 = input("Encrypted file 2: ").strip()
+                        out = input("Output filename (default hom_dot.json): ").strip() or "hom_dot.json"
+                        binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y"
+                        homomorphic_dot_files(f1, f2, out, binary)
+                    elif choice == "9":
+                        seed_input = input("Enter seed string (publicly shared): ").strip()
+                        block_size = int(input("Block size (even, default 16): ").strip() or 16)
+                        if block_size % 2 != 0:
+                            print("Block size must be even")
+                            continue
+                        n_layers = int(input("Number of layers (default 3): ").strip() or 3)
+                        modulus = int(input("Modulus (default 256): ").strip() or 256)
+                        public_inn_from_seed(seed_input, block_size, n_layers, modulus)
+                    elif choice == "10":
+                        seed_input = input("Enter public seed string: ").strip()
+                        mode = input("Mode: (t)ext or (n)umeric? [t]: ").strip().lower() or "text"
+                        message = None
+                        numbers = None
+                        bytes_per_number = None
+                        if mode == "text":
+                            message = input("Message to encrypt: ")
+                        else:
+                            content = input("Enter numbers (comma or whitespace separated): ").strip()
+                            raw_nums = [s for s in content.replace(",", " ").split() if s != ""]
+                            numbers = [int(x) for x in raw_nums]
+                            bytes_per_number = int(input("Bytes per number (default 4): ").strip() or 4)
+                        block_size = int(input("Block size (even, default 16): ").strip() or 16)
+                        if block_size % 2 != 0:
+                            print("Block size must be even")
+                            continue
+                        n_layers = int(input("Number of layers (default 3): ").strip() or 3)
+                        modulus = int(input("Modulus (default 256): ").strip() or 256)
+                        out_file = input("Output encrypted filename (default enc_pub_inn.json): ").strip() or "enc_pub_inn.json"
+                        binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y"
+                        encrypt_with_public_inn(seed_input, message, numbers, block_size, n_layers, modulus, out_file, mode, bytes_per_number, binary)
+                    elif choice == "11":
+                        seed_input = input("Enter public seed string: ").strip()
+                        enc_file = input("Encrypted file to decrypt (default enc_pub_inn.json): ").strip() or "enc_pub_inn.json"
+                        if not os.path.exists(enc_file):
+                            print("Encrypted file not found.")
+                            continue
+                        decrypt_with_public_inn(seed_input, enc_file)
+                    else:
+                        print("Invalid choice")
+                except Exception as e:
+                    print("ERROR:", e)
+    except Exception as e:
+        print("ERROR:", e)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
