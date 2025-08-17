@@ -5,8 +5,8 @@ VEINN CLI with seed-based hybrid public-key encryption (ephemeral INN seed)
 - Encrypt with recipient public key (sender): encrypts small seed -> derive INN -> encrypt message
 - Decrypt with private key (recipient): recover seed -> derive INN -> decrypt ciphertext
 - Homomorphic ops on ciphertext JSON/binary files (add, sub, scalar mul, avg, dot)
-Updated with OAEP padding, HMAC for public INN, PBKDF2 seed derivation, numeric mode, and batch mode.
-Further updated with: HMAC for RSA mode, binary storage, full batch mode, nonce-based replay protection, and larger modulus support.
+Updated with OAEP, HMAC, PBKDF2, numeric mode, batch mode, binary storage, nonce-based replay protection, and larger modulus.
+Further updated with: timestamp-based nonces, flexible nonce handling, and encrypted keystore for key management.
 """
 import os
 import sys
@@ -18,7 +18,73 @@ import secrets
 import numpy as np
 import argparse
 import pickle
+import time
 from typing import Callable
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+from base64 import b64encode, b64decode
+
+# -----------------------------
+# Key Management (Encrypted Keystore)
+# -----------------------------
+def create_keystore(passphrase: str, keystore_file: str = "keystore.json"):
+    """Create or update an encrypted keystore with a passphrase."""
+    salt = secrets.token_bytes(16)
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=100000
+    )
+    key = b64encode(kdf.derive(passphrase.encode()))
+    fernet = Fernet(key)
+    keystore = {"keys": {}, "salt": b64encode(salt).decode()}
+    with open(keystore_file, "w") as f:
+        json.dump(keystore, f)
+    return fernet, keystore_file
+
+def load_keystore(passphrase: str, keystore_file: str = "keystore.json"):
+    """Load the keystore and return the Fernet object for encryption/decryption."""
+    if not os.path.exists(keystore_file):
+        raise FileNotFoundError("Keystore file not found. Create one first.")
+    with open(keystore_file, "r") as f:
+        keystore = json.load(f)
+    salt = b64decode(keystore["salt"])
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=100000
+    )
+    key = b64encode(kdf.derive(passphrase.encode()))
+    return Fernet(key), keystore_file
+
+def store_key_in_keystore(passphrase: str, key_name: str, key_data: dict, keystore_file: str = "keystore.json"):
+    """Store a key (RSA private key or public INN seed) in the encrypted keystore."""
+    fernet, keystore_file = load_keystore(passphrase, keystore_file) if os.path.exists(keystore_file) else create_keystore(passphrase, keystore_file)
+    with open(keystore_file, "r") as f:
+        keystore = json.load(f)
+    key_str = json.dumps(key_data)
+    encrypted_key = fernet.encrypt(key_str.encode()).decode()
+    keystore["keys"][key_name] = encrypted_key
+    with open(keystore_file, "w") as f:
+        json.dump(keystore, f)
+    print(f"Stored key '{key_name}' in keystore: {keystore_file}")
+
+def retrieve_key_from_keystore(passphrase: str, key_name: str, keystore_file: str = "keystore.json"):
+    """Retrieve a key from the encrypted keystore."""
+    fernet, keystore_file = load_keystore(passphrase, keystore_file)
+    with open(keystore_file, "r") as f:
+        keystore = json.load(f)
+    if key_name not in keystore["keys"]:
+        raise ValueError(f"Key '{key_name}' not found in keystore")
+    encrypted_key = keystore["keys"][key_name]
+    try:
+        key_str = fernet.decrypt(encrypted_key.encode()).decode()
+        return json.loads(key_str)
+    except Exception as e:
+        raise ValueError("Failed to decrypt key: Wrong passphrase or corrupted keystore") from e
 
 # -----------------------------
 # OAEP Padding Functions (Pure Python, using SHA-256)
@@ -196,7 +262,7 @@ def split_blocks_flat(vec: np.ndarray, block_size: int):
     return [vec[i:i + block_size] for i in range(0, len(vec), block_size)]
 
 # -----------------------------
-# Integer coupling layer & INN (updated for larger modulus)
+# Integer coupling layer & INN
 # -----------------------------
 class IntCouplingLayer:
     def __init__(self, block_size: int, modulus: int = 256, W: np.ndarray = None):
@@ -254,8 +320,8 @@ class IntINN:
 # Stronger seed derivation using PBKDF2
 # -----------------------------
 def derive_seed_bytes(seed_str: str, dklen: int = 32):
-    salt = b'veinn_public_salt'  # Fixed salt for determinism
-    iterations = 100000  # High iteration count for security
+    salt = b'veinn_public_salt'
+    iterations = 100000
     return hashlib.pbkdf2_hmac('sha256', seed_str.encode('utf-8'), salt, iterations, dklen=dklen)
 
 # -----------------------------
@@ -289,7 +355,7 @@ def derive_inn_from_seed(seed: bytes, block_size: int, n_layers: int, modulus: i
 # -----------------------------
 # Serialization helpers for ciphertexts (JSON and binary)
 # -----------------------------
-def write_ciphertext_json(path: str, encrypted_blocks: list, metadata: dict, enc_seed_bytes: bytes, hmac_value: str = None, nonce: bytes = None):
+def write_ciphertext_json(path: str, encrypted_blocks: list, metadata: dict, enc_seed_bytes: bytes, hmac_value: str = None, nonce: bytes = None, timestamp: float = None):
     payload = {
         "inn_metadata": metadata,
         "enc_seed": [int(b) for b in enc_seed_bytes],
@@ -299,16 +365,19 @@ def write_ciphertext_json(path: str, encrypted_blocks: list, metadata: dict, enc
         payload["hmac"] = hmac_value
     if nonce:
         payload["nonce"] = [int(b) for b in nonce]
+    if timestamp:
+        payload["timestamp"] = timestamp
     with open(path, "w") as f:
         json.dump(payload, f)
 
-def write_ciphertext_binary(path: str, encrypted_blocks: list, metadata: dict, enc_seed_bytes: bytes, hmac_value: str = None, nonce: bytes = None):
+def write_ciphertext_binary(path: str, encrypted_blocks: list, metadata: dict, enc_seed_bytes: bytes, hmac_value: str = None, nonce: bytes = None, timestamp: float = None):
     payload = {
         "inn_metadata": metadata,
         "enc_seed": enc_seed_bytes,
         "encrypted": [blk.tobytes() for blk in encrypted_blocks],
         "hmac": hmac_value,
-        "nonce": nonce
+        "nonce": nonce,
+        "timestamp": timestamp
     }
     with open(path, "wb") as f:
         pickle.dump(payload, f)
@@ -321,7 +390,8 @@ def read_ciphertext_json(path: str):
     enc_blocks = [np.array([int(x) for x in blk], dtype=np.int64) for blk in payload["encrypted"]]
     hmac_value = payload.get("hmac")
     nonce = bytes([int(b) for b in payload.get("nonce", [])]) if "nonce" in payload else None
-    return metadata, enc_seed, enc_blocks, hmac_value, nonce
+    timestamp = payload.get("timestamp")
+    return metadata, enc_seed, enc_blocks, hmac_value, nonce, timestamp
 
 def read_ciphertext_binary(path: str):
     with open(path, "rb") as f:
@@ -331,7 +401,8 @@ def read_ciphertext_binary(path: str):
     enc_blocks = [np.frombuffer(blk, dtype=np.int64) for blk in payload["encrypted"]]
     hmac_value = payload.get("hmac")
     nonce = payload.get("nonce")
-    return metadata, enc_seed, enc_blocks, hmac_value, nonce
+    timestamp = payload.get("timestamp")
+    return metadata, enc_seed, enc_blocks, hmac_value, nonce, timestamp
 
 def read_ciphertext(path: str):
     if path.endswith(".json"):
@@ -342,9 +413,19 @@ def read_ciphertext(path: str):
         raise ValueError("Unsupported file format: must be .json or .bin")
 
 # -----------------------------
-# Deterministic encryption using public INN (with numeric support, HMAC, nonce)
+# Timestamp validation
 # -----------------------------
-def encrypt_with_public_inn(seed_str: str, message: str = None, numbers: list = None, block_size: int = 16, n_layers: int = 3, modulus: int = 256, out_file: str = None, mode: str = "text", bytes_per_number: int = None, binary: bool = False):
+def validate_timestamp(timestamp: float, validity_window: int = 3600):
+    """Check if timestamp is within the validity window (in seconds)."""
+    if timestamp is None:
+        return True  # Backward compatibility
+    current_time = time.time()
+    return abs(current_time - timestamp) <= validity_window
+
+# -----------------------------
+# Deterministic encryption using public INN
+# -----------------------------
+def encrypt_with_public_inn(seed_str: str, message: str = None, numbers: list = None, block_size: int = 16, n_layers: int = 3, modulus: int = 256, out_file: str = None, mode: str = "text", bytes_per_number: int = None, binary: bool = False, nonce: bytes = None):
     inn, layers_flat = public_inn_from_seed(seed_str, block_size, n_layers, modulus)
     if mode == "text":
         if message is None:
@@ -370,7 +451,8 @@ def encrypt_with_public_inn(seed_str: str, message: str = None, numbers: list = 
     else:
         raise ValueError("Invalid mode: must be 'text' or 'numeric'")
     enc_blocks = [inn.forward(blk.astype(np.int64)) for blk in blocks]
-    nonce = secrets.token_bytes(16)
+    nonce = nonce or secrets.token_bytes(16)
+    timestamp = time.time()
     metadata = {
         "block_size": block_size,
         "n_layers": n_layers,
@@ -386,7 +468,8 @@ def encrypt_with_public_inn(seed_str: str, message: str = None, numbers: list = 
         "inn_metadata": metadata,
         "enc_seed": [],
         "encrypted": [[int(x) for x in blk.tolist()] for blk in enc_blocks],
-        "nonce": [int(b) for b in nonce]
+        "nonce": [int(b) for b in nonce],
+        "timestamp": timestamp
     }
     payload_str = json.dumps(temp_payload, sort_keys=True)
     hmac_value = hmac.new(hmac_key, payload_str.encode(), hashlib.sha256).hexdigest()
@@ -395,31 +478,34 @@ def encrypt_with_public_inn(seed_str: str, message: str = None, numbers: list = 
     if binary and not out_file.endswith(".bin"):
         out_file = out_file.replace(".json", ".bin") if out_file.endswith(".json") else out_file + ".bin"
     if binary:
-        write_ciphertext_binary(out_file, enc_blocks, metadata, b'', hmac_value, nonce)
+        write_ciphertext_binary(out_file, enc_blocks, metadata, b'', hmac_value, nonce, timestamp)
     else:
-        write_ciphertext_json(out_file, enc_blocks, metadata, b'', hmac_value, nonce)
+        write_ciphertext_json(out_file, enc_blocks, metadata, b'', hmac_value, nonce, timestamp)
     print(f"Message encrypted deterministically with public INN -> {out_file}")
     return out_file
 
 # -----------------------------
-# Decrypt with public INN (with numeric support, HMAC, nonce)
+# Decrypt with public INN
 # -----------------------------
-def decrypt_with_public_inn(seed_str: str, enc_file: str):
-    metadata, enc_seed, enc_blocks, hmac_value, nonce = read_ciphertext(enc_file)
+def decrypt_with_public_inn(seed_str: str, enc_file: str, validity_window: int = 3600):
+    metadata, enc_seed, enc_blocks, hmac_value, nonce, timestamp = read_ciphertext(enc_file)
     if enc_seed:
         raise ValueError("File was not encrypted with public INN (contains RSA seed)")
+    if not validate_timestamp(timestamp, validity_window):
+        raise ValueError("Timestamp expired or invalid")
     seed_bytes = derive_seed_bytes(seed_str)
     hmac_key = expand_keystream(seed_bytes + b'hmac', 32)
     temp_payload = {
         "inn_metadata": metadata,
         "enc_seed": [],
         "encrypted": [[int(x) for x in blk.tolist()] for blk in enc_blocks],
-        "nonce": [int(b) for b in nonce] if nonce else []
+        "nonce": [int(b) for b in nonce] if nonce else [],
+        "timestamp": timestamp
     }
     payload_str = json.dumps(temp_payload, sort_keys=True)
     computed_hmac = hmac.new(hmac_key, payload_str.encode(), hashlib.sha256).hexdigest()
     if hmac_value != computed_hmac:
-        raise ValueError("HMAC verification failed: Possibly tampered file, wrong seed, or invalid nonce")
+        raise ValueError("HMAC verification failed: Possibly tampered file, wrong seed, or invalid nonce/timestamp")
     block_size = int(metadata["block_size"])
     n_layers = int(metadata["n_layers"])
     modulus = int(metadata["modulus"])
@@ -452,10 +538,10 @@ def decrypt_with_public_inn(seed_str: str, enc_file: str):
         raise
 
 # -----------------------------
-# Homomorphic helpers (updated for larger modulus)
+# Homomorphic helpers
 # -----------------------------
 def _load_encrypted_file(enc_file: str):
-    metadata, enc_seed, enc_blocks, hmac_value, nonce = read_ciphertext(enc_file)
+    metadata, enc_seed, enc_blocks, hmac_value, nonce, timestamp = read_ciphertext(enc_file)
     meta_parsed = {
         "block_size": int(metadata["block_size"]),
         "n_layers": int(metadata["n_layers"]),
@@ -464,9 +550,9 @@ def _load_encrypted_file(enc_file: str):
         "mode": metadata.get("mode", "raw"),
         "bytes_per_number": int(metadata.get("bytes_per_number", metadata.get("block_size", 4)))
     }
-    return enc_blocks, meta_parsed, hmac_value, nonce
+    return enc_blocks, meta_parsed, hmac_value, nonce, timestamp
 
-def _write_encrypted_payload(out_file: str, enc_blocks, meta, binary: bool = False, hmac_value: str = None, nonce: bytes = None):
+def _write_encrypted_payload(out_file: str, enc_blocks, meta, binary: bool = False, hmac_value: str = None, nonce: bytes = None, timestamp: float = None):
     out = {
         "inn_metadata": {
             "block_size": int(meta["block_size"]),
@@ -483,6 +569,8 @@ def _write_encrypted_payload(out_file: str, enc_blocks, meta, binary: bool = Fal
         out["hmac"] = hmac_value
     if nonce:
         out["nonce"] = [int(b) for b in nonce]
+    if timestamp:
+        out["timestamp"] = timestamp
     if binary:
         if not out_file.endswith(".bin"):
             out_file = out_file.replace(".json", ".bin") if out_file.endswith(".json") else out_file + ".bin"
@@ -493,8 +581,8 @@ def _write_encrypted_payload(out_file: str, enc_blocks, meta, binary: bool = Fal
             json.dump(out, f)
 
 def homomorphic_add_files(f1: str, f2: str, out_file: str, binary: bool = False):
-    enc1, meta1, _, _ = _load_encrypted_file(f1)
-    enc2, meta2, _, _ = _load_encrypted_file(f2)
+    enc1, meta1, _, _, _ = _load_encrypted_file(f1)
+    enc2, meta2, _, _, _ = _load_encrypted_file(f2)
     if meta1 != meta2:
         raise ValueError("Encrypted files metadata mismatch")
     if len(enc1) != len(enc2):
@@ -505,19 +593,19 @@ def homomorphic_add_files(f1: str, f2: str, out_file: str, binary: bool = False)
     print(f"Homomorphic sum saved to {out_file}")
 
 def homomorphic_sub_files(f1: str, f2: str, out_file: str, binary: bool = False):
-    enc1, meta1, _, _ = _load_encrypted_file(f1)
-    enc2, meta2, _, _ = _load_encrypted_file(f2)
+    enc1, meta1, _, _, _ = _load_encrypted_file(f1)
+    enc2, meta2, _, _, _ = _load_encrypted_file(f2)
     if meta1 != meta2:
         raise ValueError("Encrypted files metadata mismatch")
     if len(enc1) != len(enc2):
         raise ValueError("Encrypted files must have same number of blocks")
     modulus = meta1["modulus"]
-    diff = [((a - b) % modulus).astype(np.int64) for a, b in zip(enc1, enc2)]
+    diff = [((a - b) % modulus).astype(np.int64) for a, b in zip(enc1, ec2)]
     _write_encrypted_payload(out_file, diff, meta1, binary)
     print(f"Homomorphic difference saved to {out_file}")
 
 def homomorphic_scalar_mul_file(f: str, scalar: int, out_file: str, binary: bool = False):
-    enc, meta, _, _ = _load_encrypted_file(f)
+    enc, meta, _, _, _ = _load_encrypted_file(f)
     modulus = meta["modulus"]
     prod = [((blk * int(scalar)) % modulus).astype(np.int64) for blk in enc]
     _write_encrypted_payload(out_file, prod, meta, binary)
@@ -527,7 +615,7 @@ def homomorphic_average_files(files: list, out_file: str, binary: bool = False):
     encs = []
     metas = []
     for f in files:
-        enc_blocks, meta, _, _ = _load_encrypted_file(f)
+        enc_blocks, meta, _, _, _ = _load_encrypted_file(f)
         encs.append(enc_blocks)
         metas.append(meta)
     if not all(m == metas[0] for m in metas):
@@ -547,8 +635,8 @@ def homomorphic_average_files(files: list, out_file: str, binary: bool = False):
     print(f"Homomorphic average saved to {out_file}")
 
 def homomorphic_dot_files(f1: str, f2: str, out_file: str, binary: bool = False):
-    enc1, meta1, _, _ = _load_encrypted_file(f1)
-    enc2, meta2, _, _ = _load_encrypted_file(f2)
+    enc1, meta1, _, _, _ = _load_encrypted_file(f1)
+    enc2, meta2, _, _, _ = _load_encrypted_file(f2)
     if meta1 != meta2:
         raise ValueError("Encrypted files metadata mismatch")
     if len(enc1) != len(enc2):
@@ -571,22 +659,26 @@ def homomorphic_dot_files(f1: str, f2: str, out_file: str, binary: bool = False)
     print(f"Homomorphic dot product saved to {out_file}")
 
 # -----------------------------
-# Public-key hybrid encrypt / decrypt (with HMAC, nonce, binary support)
+# Public-key hybrid encrypt / decrypt
 # -----------------------------
-def generate_rsa_cli(bits: int = 2048, pubfile: str = "rsa_pub.json", privfile: str = "rsa_priv.json"):
+def generate_rsa_cli(bits: int = 2048, pubfile: str = "rsa_pub.json", privfile: str = "rsa_priv.json", keystore: str = None, passphrase: str = None, key_name: str = None):
     print("Generating RSA keypair (may take time)...")
     kp = generate_rsa_keypair(bits=bits)
     pub = {"n": kp["n"], "e": kp["e"]}
     priv = {"n": kp["n"], "d": kp["d"]}
+    if keystore and passphrase and key_name:
+        store_key_in_keystore(passphrase, key_name, priv, keystore)
+        print(f"Private key stored in keystore: {keystore} (key: {key_name})")
+    else:
+        with open(privfile, "w") as f:
+            json.dump(priv, f)
+        print(f"RSA private key -> {privfile} (KEEP SECRET)")
     with open(pubfile, "w") as f:
         json.dump(pub, f)
-    with open(privfile, "w") as f:
-        json.dump(priv, f)
     print(f"RSA public key -> {pubfile}")
-    print(f"RSA private key -> {privfile} (KEEP SECRET)")
     return pubfile, privfile
 
-def encrypt_with_pub(pubfile: str, in_path: str = None, message: str = None, numbers: list = None, mode: str = "text", block_size: int = 16, n_layers: int = 3, modulus: int = 256, seed_len: int = 32, out_file: str = None, binary: bool = False):
+def encrypt_with_pub(pubfile: str, in_path: str = None, message: str = None, numbers: list = None, mode: str = "text", block_size: int = 16, n_layers: int = 3, modulus: int = 256, seed_len: int = 32, out_file: str = None, binary: bool = False, nonce: bytes = None):
     if not os.path.exists(pubfile):
         raise FileNotFoundError("RSA public key file not found")
     with open(pubfile, "r") as f:
@@ -629,7 +721,8 @@ def encrypt_with_pub(pubfile: str, in_path: str = None, message: str = None, num
     padded_seed = oaep_encode(seed, k, hash_func=sha256)
     enc_seed_int = pow(bytes_be_to_int(padded_seed), e, n)
     enc_seed_bytes = int_to_bytes_be(enc_seed_int, k)
-    nonce = secrets.token_bytes(16)
+    nonce = nonce or secrets.token_bytes(16)
+    timestamp = time.time()
     metadata = {
         "block_size": block_size,
         "n_layers": n_layers,
@@ -644,7 +737,8 @@ def encrypt_with_pub(pubfile: str, in_path: str = None, message: str = None, num
         "inn_metadata": metadata,
         "enc_seed": [int(b) for b in enc_seed_bytes],
         "encrypted": [[int(x) for x in blk.tolist()] for blk in enc_blocks],
-        "nonce": [int(b) for b in nonce]
+        "nonce": [int(b) for b in nonce],
+        "timestamp": timestamp
     }
     payload_str = json.dumps(temp_payload, sort_keys=True)
     hmac_value = hmac.new(hmac_key, payload_str.encode(), hashlib.sha256).hexdigest()
@@ -653,36 +747,41 @@ def encrypt_with_pub(pubfile: str, in_path: str = None, message: str = None, num
     if binary and not out_file.endswith(".bin"):
         out_file = out_file.replace(".json", ".bin") if out_file.endswith(".json") else out_file + ".bin"
     if binary:
-        write_ciphertext_binary(out_file, enc_blocks, metadata, enc_seed_bytes, hmac_value, nonce)
+        write_ciphertext_binary(out_file, enc_blocks, metadata, enc_seed_bytes, hmac_value, nonce, timestamp)
     else:
-        write_ciphertext_json(out_file, enc_blocks, metadata, enc_seed_bytes, hmac_value, nonce)
+        write_ciphertext_json(out_file, enc_blocks, metadata, enc_seed_bytes, hmac_value, nonce, timestamp)
     print(f"Encrypted message (with RSA-encrypted seed) saved to {out_file}")
     return out_file
 
-def decrypt_with_priv(keysfile: str, privfile: str, enc_file: str):
-    if not os.path.exists(privfile):
-        raise FileNotFoundError("RSA private key file not found")
-    with open(privfile, "r") as f:
-        priv = json.load(f)
+def decrypt_with_priv(keysfile: str, privfile: str, enc_file: str, passphrase: str = None, key_name: str = None, validity_window: int = 3600):
+    if keysfile or (passphrase and key_name):
+        if not keysfile:
+            keysfile = "keystore.json"
+        priv = retrieve_key_from_keystore(passphrase, key_name, keysfile)
+    else:
+        if not os.path.exists(privfile):
+            raise FileNotFoundError("RSA private key file not found")
+        with open(privfile, "r") as f:
+            priv = json.load(f)
     d = int(priv["d"])
     n = int(priv["n"])
     k = (n.bit_length() + 7) // 8
-    metadata, enc_seed_bytes, enc_blocks, hmac_value, nonce = read_ciphertext(enc_file)
-    hmac_key = expand_keystream(oaep_decode(int_to_bytes_be(pow(bytes_be_to_int(enc_seed_bytes), d, n), k), k, hash_func=sha256) + b'hmac', 32)
+    metadata, enc_seed_bytes, enc_blocks, hmac_value, nonce, timestamp = read_ciphertext(enc_file)
+    if not validate_timestamp(timestamp, validity_window):
+        raise ValueError("Timestamp expired or invalid")
+    seed_bytes = oaep_decode(int_to_bytes_be(pow(bytes_be_to_int(enc_seed_bytes), d, n), k), k, hash_func=sha256)
+    hmac_key = expand_keystream(seed_bytes + b'hmac', 32)
     temp_payload = {
         "inn_metadata": metadata,
         "enc_seed": [int(b) for b in enc_seed_bytes],
         "encrypted": [[int(x) for x in blk.tolist()] for blk in enc_blocks],
-        "nonce": [int(b) for b in nonce] if nonce else []
+        "nonce": [int(b) for b in nonce] if nonce else [],
+        "timestamp": timestamp
     }
     payload_str = json.dumps(temp_payload, sort_keys=True)
     computed_hmac = hmac.new(hmac_key, payload_str.encode(), hashlib.sha256).hexdigest()
     if hmac_value != computed_hmac:
-        raise ValueError("HMAC verification failed: Possibly tampered file or wrong private key")
-    enc_seed_int = bytes_be_to_int(enc_seed_bytes)
-    dec_padded_int = pow(enc_seed_int, d, n)
-    dec_padded = int_to_bytes_be(dec_padded_int, k)
-    seed_bytes = oaep_decode(dec_padded, k, hash_func=sha256)
+        raise ValueError("HMAC verification failed: Possibly tampered file, wrong private key, or invalid nonce/timestamp")
     block_size = int(metadata["block_size"])
     n_layers = int(metadata["n_layers"])
     modulus = int(metadata["modulus"])
@@ -717,11 +816,19 @@ def main():
     parser = argparse.ArgumentParser(description="VEINN CLI")
     subparsers = parser.add_subparsers(dest="command")
 
+    # Keystore management
+    keystore_parser = subparsers.add_parser("create_keystore", help="Create a new encrypted keystore")
+    keystore_parser.add_argument("--passphrase", required=True, help="Keystore passphrase")
+    keystore_parser.add_argument("--keystore_file", default="keystore.json", help="Keystore file path")
+
     # RSA key generation
     rsa_parser = subparsers.add_parser("generate_rsa", help="Generate RSA keypair")
     rsa_parser.add_argument("--bits", type=int, default=2048, help="RSA key size in bits")
     rsa_parser.add_argument("--pubfile", default="rsa_pub.json", help="Public key output file")
     rsa_parser.add_argument("--privfile", default="rsa_priv.json", help="Private key output file")
+    rsa_parser.add_argument("--keystore", help="Store private key in keystore")
+    rsa_parser.add_argument("--passphrase", help="Keystore passphrase")
+    rsa_parser.add_argument("--key_name", help="Key name in keystore")
 
     # Public encrypt
     pub_enc_parser = subparsers.add_parser("public_encrypt", help="Encrypt with public INN")
@@ -735,11 +842,19 @@ def main():
     pub_enc_parser.add_argument("--modulus", type=int, default=256, help="Modulus")
     pub_enc_parser.add_argument("--out_file", default="enc_pub_inn.json", help="Output file")
     pub_enc_parser.add_argument("--binary", action="store_true", help="Use binary output format")
+    pub_enc_parser.add_argument("--nonce", help="Custom nonce (base64-encoded)")
+    pub_enc_parser.add_argument("--keystore", help="Store seed in keystore")
+    pub_enc_parser.add_argument("--passphrase", help="Keystore passphrase")
+    pub_enc_parser.add_argument("--key_name", help="Seed name in keystore")
 
     # Public decrypt
     pub_dec_parser = subparsers.add_parser("public_decrypt", help="Decrypt with public INN")
-    pub_dec_parser.add_argument("--seed", required=True, help="Public seed string")
+    pub_dec_parser.add_argument("--seed", help="Public seed string")
+    pub_dec_parser.add_argument("--keystore", help="Retrieve seed from keystore")
+    pub_dec_parser.add_argument("--passphrase", help="Keystore passphrase")
+    pub_dec_parser.add_argument("--key_name", help="Seed name in keystore")
     pub_dec_parser.add_argument("--enc_file", default="enc_pub_inn.json", help="Encrypted file")
+    pub_dec_parser.add_argument("--validity_window", type=int, default=3600, help="Timestamp validity window (seconds)")
 
     # RSA encrypt
     rsa_enc_parser = subparsers.add_parser("rsa_encrypt", help="Encrypt with RSA public key")
@@ -755,11 +870,16 @@ def main():
     rsa_enc_parser.add_argument("--seed_len", type=int, default=32, help="Ephemeral seed length")
     rsa_enc_parser.add_argument("--out_file", default="enc_pub.json", help="Output file")
     rsa_enc_parser.add_argument("--binary", action="store_true", help="Use binary output format")
+    rsa_enc_parser.add_argument("--nonce", help="Custom nonce (base64-encoded)")
 
     # RSA decrypt
     rsa_dec_parser = subparsers.add_parser("rsa_decrypt", help="Decrypt with RSA private key")
     rsa_dec_parser.add_argument("--privfile", default="rsa_priv.json", help="RSA private key file")
+    rsa_dec_parser.add_argument("--keystore", help="Retrieve private key from keystore")
+    rsa_dec_parser.add_argument("--passphrase", help="Keystore passphrase")
+    rsa_dec_parser.add_argument("--key_name", help="Key name in keystore")
     rsa_dec_parser.add_argument("--enc_file", default="enc_pub.json", help="Encrypted file")
+    rsa_dec_parser.add_argument("--validity_window", type=int, default=3600, help="Timestamp validity window (seconds)")
 
     # Homomorphic operations
     hom_add_parser = subparsers.add_parser("hom_add", help="Homomorphic addition")
@@ -793,7 +913,10 @@ def main():
 
     # Public INN derivation
     pub_inn_parser = subparsers.add_parser("public_inn", help="Derive public INN from seed")
-    pub_inn_parser.add_argument("--seed", required=True, help="Public seed string")
+    pub_inn_parser.add_argument("--seed", help="Public seed string")
+    pub_inn_parser.add_argument("--keystore", help="Retrieve seed from keystore")
+    pub_inn_parser.add_argument("--passphrase", help="Keystore passphrase")
+    pub_inn_parser.add_argument("--key_name", help="Seed name in keystore")
     pub_inn_parser.add_argument("--block_size", type=int, default=16, help="Block size (even)")
     pub_inn_parser.add_argument("--n_layers", type=int, default=3, help="Number of layers")
     pub_inn_parser.add_argument("--modulus", type=int, default=256, help="Modulus")
@@ -801,16 +924,29 @@ def main():
     args = parser.parse_known_args()[0]
 
     try:
-        if args.command == "generate_rsa":
-            generate_rsa_cli(args.bits, args.pubfile, args.privfile)
+        if args.command == "create_keystore":
+            create_keystore(args.passphrase, args.keystore_file)
+            print(f"Keystore created: {args.keystore_file}")
+        elif args.command == "generate_rsa":
+            pubfile, privfile = generate_rsa_cli(args.bits, args.pubfile, args.privfile, args.keystore, args.passphrase, args.key_name)
         elif args.command == "public_encrypt":
-            encrypt_with_public_inn(args.seed, args.message, args.numbers, args.block_size, args.n_layers, args.modulus, args.out_file, args.mode, args.bytes_per_number, args.binary)
+            if args.keystore and args.passphrase and args.key_name:
+                seed_data = retrieve_key_from_keystore(args.passphrase, args.key_name, args.keystore)
+                args.seed = seed_data["seed"]
+            nonce = b64decode(args.nonce) if args.nonce else None
+            out_file = encrypt_with_public_inn(args.seed, args.message, args.numbers, args.block_size, args.n_layers, args.modulus, args.out_file, args.mode, args.bytes_per_number, args.binary, nonce)
+            if args.keystore and args.passphrase and args.key_name:
+                store_key_in_keystore(args.passphrase, args.key_name, {"seed": args.seed}, args.keystore)
         elif args.command == "public_decrypt":
-            decrypt_with_public_inn(args.seed, args.enc_file)
+            if args.keystore and args.passphrase and args.key_name:
+                seed_data = retrieve_key_from_keystore(args.passphrase, args.key_name, args.keystore)
+                args.seed = seed_data["seed"]
+            decrypt_with_public_inn(args.seed, args.enc_file, args.validity_window)
         elif args.command == "rsa_encrypt":
-            encrypt_with_pub(args.pubfile, args.in_path, args.message, args.numbers, args.mode, args.block_size, args.n_layers, args.modulus, args.seed_len, args.out_file, args.binary)
+            nonce = b64decode(args.nonce) if args.nonce else None
+            encrypt_with_pub(args.pubfile, args.in_path, args.message, args.numbers, args.mode, args.block_size, args.n_layers, args.modulus, args.seed_len, args.out_file, args.binary, nonce)
         elif args.command == "rsa_decrypt":
-            decrypt_with_priv(None, args.privfile, args.enc_file)
+            decrypt_with_priv(args.keystore, args.privfile, args.enc_file, args.passphrase, args.key_name, args.validity_window)
         elif args.command == "hom_add":
             homomorphic_add_files(args.file1, args.file2, args.out_file, args.binary)
         elif args.command == "hom_sub":
@@ -822,23 +958,27 @@ def main():
         elif args.command == "hom_dot":
             homomorphic_dot_files(args.file1, args.file2, args.out_file, args.binary)
         elif args.command == "public_inn":
+            if args.keystore and args.passphrase and args.key_name:
+                seed_data = retrieve_key_from_keystore(args.passphrase, args.key_name, args.keystore)
+                args.seed = seed_data["seed"]
             public_inn_from_seed(args.seed, args.block_size, args.n_layers, args.modulus)
         else:
             # Interactive mode
             print("VEINN CLI — seed-based public-key hybrid (ephemeral INN seed) + homomorphic ops")
             while True:
                 print("")
-                print("1) Generate RSA keypair (public/private)")
-                print("2) Encrypt with recipient public key (seed-based ephemeral INN)")
-                print("3) Decrypt with private key")
-                print("4) Homomorphic add (file1, file2 -> out)")
-                print("5) Homomorphic subtract (file1, file2 -> out)")
-                print("6) Homomorphic scalar multiply (file, scalar -> out)")
-                print("7) Homomorphic average (file1,file2,... -> out)")
-                print("8) Homomorphic dot product (file1, file2 -> out)")
-                print("9) Derive public INN from seed (deterministic encryption without private key)")
-                print("10) Encrypt deterministically using public INN (seed-based, no private key)")
-                print("11) Decrypt deterministically using public INN (seed-based, no private key)")
+                print("1) Create encrypted keystore")
+                print("2) Generate RSA keypair (public/private)")
+                print("3) Encrypt with recipient public key (seed-based ephemeral INN)")
+                print("4) Decrypt with private key")
+                print("5) Homomorphic add (file1, file2 -> out)")
+                print("6) Homomorphic subtract (file1, file2 -> out)")
+                print("7) Homomorphic scalar multiply (file, scalar -> out)")
+                print("8) Homomorphic average (file1,file2,... -> out)")
+                print("9) Homomorphic dot product (file1, file2 -> out)")
+                print("10) Derive public INN from seed (deterministic encryption without private key)")
+                print("11) Encrypt deterministically using public INN (seed-based, no private key)")
+                print("12) Decrypt deterministically using public INN (seed-based, no private key)")
                 print("0) Exit")
                 choice = input("Choice: ").strip()
 
@@ -846,11 +986,23 @@ def main():
                     if choice == "0":
                         break
                     elif choice == "1":
+                        passphrase = input("Enter keystore passphrase: ")
+                        keystore_file = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
+                        create_keystore(passphrase, keystore_file)
+                        print(f"Keystore created: {keystore_file}")
+                    elif choice == "2":
                         bits = int(input("RSA key size in bits (default 2048): ").strip() or 2048)
                         pubfile = input("Public key filename (default rsa_pub.json): ").strip() or "rsa_pub.json"
-                        privfile = input("Private key filename (default rsa_priv.json): ").strip() or "rsa_priv.json"
-                        generate_rsa_cli(bits, pubfile, privfile)
-                    elif choice == "2":
+                        use_keystore = input("Store private key in keystore? (y/n): ").strip().lower() == "y"
+                        privfile, passphrase, key_name = None, None, None
+                        if use_keystore:
+                            keystore = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
+                            passphrase = input("Keystore passphrase: ")
+                            key_name = input("Key name in keystore: ")
+                        else:
+                            privfile = input("Private key filename (default rsa_priv.json): ").strip() or "rsa_priv.json"
+                        generate_rsa_cli(bits, pubfile, privfile, keystore, passphrase, key_name)
+                    elif choice == "3":
                         pubfile = input("Recipient RSA public key file (default rsa_pub.json): ").strip() or "rsa_pub.json"
                         if not os.path.exists(pubfile):
                             print("Public key not found. Generate RSA keys first.")
@@ -865,46 +1017,68 @@ def main():
                         modulus = int(input("Modulus (default 256): ").strip() or 256)
                         seed_len = int(input("Seed length (default 32): ").strip() or 32)
                         binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y"
-                        encrypt_with_pub(pubfile, in_path=inpath, mode=mode, block_size=block_size, n_layers=n_layers, modulus=modulus, seed_len=seed_len, binary=binary)
-                    elif choice == "3":
-                        privfile = input("RSA private key file (default rsa_priv.json): ").strip() or "rsa_priv.json"
-                        encfile = input("Encrypted file to decrypt (default enc_pub.json): ").strip() or "enc_pub.json"
-                        if not os.path.exists(privfile) or not os.path.exists(encfile):
-                            print("File not found.")
-                            continue
-                        decrypt_with_priv(None, privfile, encfile)
+                        nonce_str = input("Custom nonce (base64, blank for random): ").strip() or None
+                        nonce = b64decode(nonce_str) if nonce_str else None
+                        encrypt_with_pub(pubfile, in_path=inpath, mode=mode, block_size=block_size, n_layers=n_layers, modulus=modulus, seed_len=seed_len, binary=binary, nonce=nonce)
                     elif choice == "4":
+                        use_keystore = input("Use keystore for private key? (y/n): ").strip().lower() == "y"
+                        privfile, keystore, passphrase, key_name = None, None, None, None
+                        if use_keystore:
+                            keystore = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
+                            passphrase = input("Keystore passphrase: ")
+                            key_name = input("Key name in keystore: ")
+                        else:
+                            privfile = input("RSA private key file (default rsa_priv.json): ").strip() or "rsa_priv.json"
+                        encfile = input("Encrypted file to decrypt (default enc_pub.json): ").strip() or "enc_pub.json"
+                        validity_window = int(input("Timestamp validity window in seconds (default 3600): ").strip() or 3600)
+                        if not (privfile and os.path.exists(privfile)) and not (keystore and passphrase and key_name):
+                            print("Invalid private key source.")
+                            continue
+                        if not os.path.exists(encfile):
+                            print("Encrypted file not found.")
+                            continue
+                        decrypt_with_priv(keystore, privfile, encfile, passphrase, key_name, validity_window)
+                    elif choice == "5":
                         f1 = input("Encrypted file 1: ").strip()
                         f2 = input("Encrypted file 2: ").strip()
                         out = input("Output filename (default hom_add.json): ").strip() or "hom_add.json"
                         binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y"
                         homomorphic_add_files(f1, f2, out, binary)
-                    elif choice == "5":
+                    elif choice == "6":
                         f1 = input("Encrypted file 1: ").strip()
                         f2 = input("Encrypted file 2: ").strip()
                         out = input("Output filename (default hom_sub.json): ").strip() or "hom_sub.json"
                         binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y"
                         homomorphic_sub_files(f1, f2, out, binary)
-                    elif choice == "6":
+                    elif choice == "7":
                         f = input("Encrypted file: ").strip()
                         scalar = int(input("Scalar (integer): ").strip())
                         out = input("Output filename (default hom_mul.json): ").strip() or "hom_mul.json"
                         binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y"
                         homomorphic_scalar_mul_file(f, scalar, out, binary)
-                    elif choice == "7":
+                    elif choice == "8":
                         files = input("Comma-separated encrypted files to average: ").strip().split(",")
                         files = [s.strip() for s in files if s.strip()]
                         out = input("Output filename (default hom_avg.json): ").strip() or "hom_avg.json"
                         binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y"
                         homomorphic_average_files(files, out, binary)
-                    elif choice == "8":
+                    elif choice == "9":
                         f1 = input("Encrypted file 1: ").strip()
                         f2 = input("Encrypted file 2: ").strip()
                         out = input("Output filename (default hom_dot.json): ").strip() or "hom_dot.json"
                         binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y"
                         homomorphic_dot_files(f1, f2, out, binary)
-                    elif choice == "9":
-                        seed_input = input("Enter seed string (publicly shared): ").strip()
+                    elif choice == "10":
+                        use_keystore = input("Use keystore for seed? (y/n): ").strip().lower() == "y"
+                        seed_input, keystore, passphrase, key_name = None, None, None, None
+                        if use_keystore:
+                            keystore = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
+                            passphrase = input("Keystore passphrase: ")
+                            key_name = input("Seed name in keystore: ")
+                            seed_data = retrieve_key_from_keystore(passphrase, key_name, keystore)
+                            seed_input = seed_data["seed"]
+                        else:
+                            seed_input = input("Enter seed string (publicly shared): ").strip()
                         block_size = int(input("Block size (even, default 16): ").strip() or 16)
                         if block_size % 2 != 0:
                             print("Block size must be even")
@@ -912,8 +1086,17 @@ def main():
                         n_layers = int(input("Number of layers (default 3): ").strip() or 3)
                         modulus = int(input("Modulus (default 256): ").strip() or 256)
                         public_inn_from_seed(seed_input, block_size, n_layers, modulus)
-                    elif choice == "10":
-                        seed_input = input("Enter public seed string: ").strip()
+                    elif choice == "11":
+                        use_keystore = input("Use keystore for seed? (y/n): ").strip().lower() == "y"
+                        seed_input, keystore, passphrase, key_name = None, None, None, None
+                        if use_keystore:
+                            keystore = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
+                            passphrase = input("Keystore passphrase: ")
+                            key_name = input("Seed name in keystore: ")
+                            seed_data = retrieve_key_from_keystore(passphrase, key_name, keystore)
+                            seed_input = seed_data["seed"]
+                        else:
+                            seed_input = input("Enter public seed string: ").strip()
                         mode = input("Mode: (t)ext or (n)umeric? [t]: ").strip().lower() or "text"
                         message = None
                         numbers = None
@@ -933,14 +1116,28 @@ def main():
                         modulus = int(input("Modulus (default 256): ").strip() or 256)
                         out_file = input("Output encrypted filename (default enc_pub_inn.json): ").strip() or "enc_pub_inn.json"
                         binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y"
-                        encrypt_with_public_inn(seed_input, message, numbers, block_size, n_layers, modulus, out_file, mode, bytes_per_number, binary)
-                    elif choice == "11":
-                        seed_input = input("Enter public seed string: ").strip()
+                        nonce_str = input("Custom nonce (base64, blank for random): ").strip() or None
+                        nonce = b64decode(nonce_str) if nonce_str else None
+                        out_file = encrypt_with_public_inn(seed_input, message, numbers, block_size, n_layers, modulus, out_file, mode, bytes_per_number, binary, nonce)
+                        if use_keystore:
+                            store_key_in_keystore(passphrase, key_name, {"seed": seed_input}, keystore)
+                    elif choice == "12":
+                        use_keystore = input("Use keystore for seed? (y/n): ").strip().lower() == "y"
+                        seed_input, keystore, passphrase, key_name = None, None, None, None
+                        if use_keystore:
+                            keystore = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
+                            passphrase = input("Keystore passphrase: ")
+                            key_name = input("Seed name in keystore: ")
+                            seed_data = retrieve_key_from_keystore(passphrase, key_name, keystore)
+                            seed_input = seed_data["seed"]
+                        else:
+                            seed_input = input("Enter public seed string: ").strip()
                         enc_file = input("Encrypted file to decrypt (default enc_pub_inn.json): ").strip() or "enc_pub_inn.json"
+                        validity_window = int(input("Timestamp validity window in seconds (default 3600): ").strip() or 3600)
                         if not os.path.exists(enc_file):
                             print("Encrypted file not found.")
                             continue
-                        decrypt_with_public_inn(seed_input, enc_file)
+                        decrypt_with_public_inn(seed_input, enc_file, validity_window)
                     else:
                         print("Invalid choice")
                 except Exception as e:
