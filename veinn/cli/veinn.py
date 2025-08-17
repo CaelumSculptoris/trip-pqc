@@ -6,14 +6,18 @@ VEINN CLI with seed-based hybrid public-key encryption (ephemeral INN seed)
 - Decrypt with private key (recipient): recover seed -> derive INN -> decrypt ciphertext
 - Homomorphic ops on ciphertext JSON files (add, sub, scalar mul, avg, dot)
 Updated with OAEP padding for RSA, better metadata handling, and improved error handling.
+Further updated with potential improvements: HMAC for authentication, numeric mode support for public INN,
+stronger seed derivation via PBKDF2, enhanced error feedback, and basic batch mode via argparse.
 """
 import os
 import sys
 import json
 import math
 import hashlib
+import hmac
 import secrets
 import numpy as np
+import argparse
 from typing import Callable
 
 # -----------------------------
@@ -187,13 +191,12 @@ def pkcs7_unpad(vec: np.ndarray) -> np.ndarray:
     if 0 < pad_len <= len(vec) and all(vec[-pad_len:] == pad_len):
         return vec[:-pad_len]
     raise ValueError("Invalid PKCS7 padding")
-    return vec
 
 def split_blocks_flat(vec: np.ndarray, block_size: int):
     return [vec[i:i + block_size] for i in range(0, len(vec), block_size)]
 
 # -----------------------------
-# Integer coupling layer & INN (same as before)
+# Integer coupling layer & INN
 # -----------------------------
 class IntCouplingLayer:
     def __init__(self, block_size: int, modulus: int = 256, W: np.ndarray = None):
@@ -248,6 +251,14 @@ class IntINN:
         return b.astype(np.int64)
 
 # -----------------------------
+# Stronger seed derivation using PBKDF2
+# -----------------------------
+def derive_seed_bytes(seed_str: str, dklen: int = 32):
+    salt = b'veinn_public_salt'  # Fixed salt for determinism
+    iterations = 100000  # High iteration count for security
+    return hashlib.pbkdf2_hmac('sha256', seed_str.encode('utf-8'), salt, iterations, dklen=dklen)
+
+# -----------------------------
 # Public INN derivation from known seed
 # -----------------------------
 def public_inn_from_seed(seed_str: str, block_size: int = 16, n_layers: int = 3, modulus: int = 256):
@@ -255,7 +266,7 @@ def public_inn_from_seed(seed_str: str, block_size: int = 16, n_layers: int = 3,
     Deterministically generate a public INN from a seed string.
     Anyone with the seed can derive this INN and use it to encrypt messages.
     """
-    seed_bytes = seed_str.encode("utf-8")  # simple UTF-8 encoding of seed
+    seed_bytes = derive_seed_bytes(seed_str)
     inn, layers_flat = derive_inn_from_seed(seed_bytes, block_size, n_layers, modulus)
     print(f"Derived INN from seed '{seed_str}':")
     print(f"- block_size: {block_size}, n_layers: {n_layers}, modulus: {modulus}")
@@ -275,7 +286,6 @@ def derive_inn_from_seed(seed: bytes, block_size: int, n_layers: int, modulus: i
     total_bytes = per_layer * n_layers
     ks = expand_keystream(seed, total_bytes)
     layers_flat = []
-    # map each byte to int in 0..modulus-1
     for i in range(n_layers):
         start = i * per_layer
         chunk = ks[start:start + per_layer]
@@ -285,14 +295,16 @@ def derive_inn_from_seed(seed: bytes, block_size: int, n_layers: int, modulus: i
     return inn, layers_flat
 
 # -----------------------------
-# Serialization helpers for ciphertexts (JSON-safe)
+# Serialization helpers for ciphertexts (JSON-safe) with HMAC
 # -----------------------------
-def write_ciphertext_json(path: str, encrypted_blocks: list, metadata: dict, enc_seed_bytes: bytes):
+def write_ciphertext_json(path: str, encrypted_blocks: list, metadata: dict, enc_seed_bytes: bytes, hmac_value: str = None):
     payload = {
         "inn_metadata": metadata,
         "enc_seed": [int(b) for b in enc_seed_bytes],  # RSA-encrypted seed bytes as ints
         "encrypted": [[int(x) for x in blk.tolist()] for blk in encrypted_blocks]
     }
+    if hmac_value:
+        payload["hmac"] = hmac_value
     with open(path, "w") as f:
         json.dump(payload, f)
 
@@ -302,26 +314,44 @@ def read_ciphertext_json(path: str):
     enc_seed = bytes([int(b) for b in payload["enc_seed"]])
     metadata = payload["inn_metadata"]
     enc_blocks = [np.array([int(x) for x in blk], dtype=np.int64) for blk in payload["encrypted"]]
-    return metadata, enc_seed, enc_blocks
+    hmac_value = payload.get("hmac")
+    return metadata, enc_seed, enc_blocks, hmac_value
 
 # -----------------------------
-# Deterministic encryption using public INN derived from seed
+# Deterministic encryption using public INN derived from seed (with numeric support and HMAC)
 # -----------------------------
-def encrypt_with_public_inn(seed_str: str, message: str = None, block_size: int = 16, n_layers: int = 3, modulus: int = 256, out_file: str = None):
+def encrypt_with_public_inn(seed_str: str, message: str = None, numbers: list = None, block_size: int = 16, n_layers: int = 3, modulus: int = 256, out_file: str = None, mode: str = "text", bytes_per_number: int = None):
     """
-    Encrypt a message deterministically using a public INN derived from a known seed.
+    Encrypt a message or numbers deterministically using a public INN derived from a known seed.
     """
     # Derive INN from seed
     inn, layers_flat = public_inn_from_seed(seed_str, block_size, n_layers, modulus)
 
-    # Input message
-    if message is None:
-        message = input("Message to encrypt: ")
-
-    # Vectorize, pad, split into blocks
-    data = vectorize_text(message)
-    padded = pkcs7_pad(data, block_size)
-    blocks = split_blocks_flat(padded, block_size)
+    if mode == "text":
+        # Input message
+        if message is None:
+            message = input("Message to encrypt: ")
+        data = vectorize_text(message)
+        padded = pkcs7_pad(data, block_size)
+        blocks = split_blocks_flat(padded, block_size)
+    elif mode == "numeric":
+        if numbers is None:
+            content = input("Enter numbers (comma or whitespace separated): ").strip()
+            raw_nums = [s for s in content.replace(",", " ").split() if s != ""]
+            numbers = [int(x) for x in raw_nums]
+        if bytes_per_number is None:
+            bytes_per_number = int(input("Bytes per number (default 1): ").strip() or 1)
+        # pack each number to block_size (big-endian)
+        blocks = []
+        for v in numbers:
+            b = int_to_bytes_be(v, bytes_per_number)
+            if len(b) > block_size:
+                raise ValueError("Number too large for block_size")
+            if len(b) < block_size:
+                b = (b"\x00" * (block_size - len(b))) + b
+            blocks.append(np.frombuffer(b, dtype=np.uint8))
+    else:
+        raise ValueError("Invalid mode: must be 'text' or 'numeric'")
 
     # Encrypt blocks
     enc_blocks = []
@@ -334,26 +364,95 @@ def encrypt_with_public_inn(seed_str: str, message: str = None, block_size: int 
         "block_size": block_size,
         "n_layers": n_layers,
         "modulus": modulus,
-        "mode": "text",
+        "mode": mode,
         "seed_str": seed_str  # store seed used for public deterministic encryption
     }
+    if mode == "numeric":
+        metadata["bytes_per_number"] = bytes_per_number
 
     # Output file
     if out_file is None:
         out_file = input("Output encrypted filename (default enc_pub_inn.json): ").strip() or "enc_pub_inn.json"
 
-    # Write JSON (no RSA seed)
-    payload = {
+    # Compute HMAC
+    seed_bytes = derive_seed_bytes(seed_str)
+    hmac_key = expand_keystream(seed_bytes + b'hmac', 32)
+    temp_payload = {
         "inn_metadata": metadata,
-        "enc_seed": [],  # empty because no RSA seed
+        "enc_seed": [],
         "encrypted": [[int(x) for x in blk.tolist()] for blk in enc_blocks]
     }
+    payload_str = json.dumps(temp_payload, sort_keys=True)
+    hmac_value = hmac.new(hmac_key, payload_str.encode(), hashlib.sha256).hexdigest()
 
-    with open(out_file, "w") as f:
-        json.dump(payload, f)
+    # Write JSON (no RSA seed)
+    write_ciphertext_json(out_file, enc_blocks, metadata, b'', hmac_value)
 
     print(f"Message encrypted deterministically with public INN -> {out_file}")
     return out_file
+
+# -----------------------------
+# Decrypt with public INN (with numeric support, HMAC verification, and better error feedback)
+# -----------------------------
+def decrypt_with_public_inn(seed_str: str, enc_file: str):
+    """
+    Decrypt a message encrypted with a public INN using the shared seed string.
+    """
+    # Read encrypted file
+    metadata, enc_seed, enc_blocks, hmac_value = read_ciphertext_json(enc_file)
+    if enc_seed:
+        raise ValueError("File was not encrypted with public INN (contains RSA seed)")
+
+    # Verify HMAC
+    seed_bytes = derive_seed_bytes(seed_str)
+    hmac_key = expand_keystream(seed_bytes + b'hmac', 32)
+    temp_payload = {
+        "inn_metadata": metadata,
+        "enc_seed": [],
+        "encrypted": [[int(x) for x in blk.tolist()] for blk in enc_blocks]
+    }
+    payload_str = json.dumps(temp_payload, sort_keys=True)
+    computed_hmac = hmac.new(hmac_key, payload_str.encode(), hashlib.sha256).hexdigest()
+    if hmac_value != computed_hmac:
+        raise ValueError("HMAC verification failed: Possibly tampered file or wrong seed")
+
+    # Derive INN from seed
+    block_size = int(metadata["block_size"])
+    n_layers = int(metadata["n_layers"])
+    modulus = int(metadata["modulus"])
+    inn, layers_flat = derive_inn_from_seed(seed_bytes, block_size, n_layers, modulus)
+
+    # Decrypt blocks
+    decrypted_blocks = []
+    for blk in enc_blocks:
+        dec = inn.reverse(blk.astype(np.int64)).astype(np.uint8)
+        decrypted_blocks.append(dec)
+    flat = np.concatenate(decrypted_blocks).astype(np.uint8)
+
+    mode = metadata.get("mode", "text")
+    try:
+        if mode == "text":
+            unpadded = pkcs7_unpad(flat)
+            text = devectorize_text(unpadded)
+            print("Decrypted (text):")
+            print(text)
+            return text
+        elif mode == "numeric":
+            bytes_per_number = int(metadata.get("bytes_per_number", block_size))
+            nums = []
+            for dec_blk in decrypted_blocks:
+                b = dec_blk.tobytes()[-bytes_per_number:]
+                v = bytes_be_to_int(b)
+                nums.append(v)
+            print("Decrypted (numeric list):")
+            print(nums)
+            return nums
+        else:
+            raise ValueError("Unsupported mode in metadata")
+    except ValueError as e:
+        print("Decryption failed:", e)
+        print("Possibly wrong seed, corrupted file, or invalid padding.")
+        raise
 
 # -----------------------------
 # Homomorphic helpers (operate on ciphertext JSON files)
@@ -571,7 +670,7 @@ def decrypt_with_priv(keysfile: str, privfile: str, enc_file: str):
     n = int(priv["n"])
     k = (n.bit_length() + 7) // 8
 
-    metadata, enc_seed_bytes, enc_blocks = read_ciphertext_json(enc_file)
+    metadata, enc_seed_bytes, enc_blocks, hmac_value = read_ciphertext_json(enc_file)
     # RSA-decrypt enc_seed with OAEP
     enc_seed_int = bytes_be_to_int(enc_seed_bytes)
     dec_padded_int = pow(enc_seed_int, d, n)
@@ -591,56 +690,60 @@ def decrypt_with_priv(keysfile: str, privfile: str, enc_file: str):
         decrypted_blocks.append(dec)
     flat = np.concatenate(decrypted_blocks).astype(np.uint8)
     mode = metadata.get("mode", "text")
-    if mode == "text":
-        unpadded = pkcs7_unpad(flat)
-        text = devectorize_text(unpadded)
-        print("Decrypted (text):")
-        print(text)
-    else:  # numeric
-        bytes_per_number = int(metadata.get("bytes_per_number", block_size))
-        nums = []
-        for dec_blk in decrypted_blocks:
-            b = dec_blk.tobytes()[-bytes_per_number:]
-            v = bytes_be_to_int(b)
-            nums.append(v)
-        print("Decrypted (numeric list):")
-        print(nums)
+    try:
+        if mode == "text":
+            unpadded = pkcs7_unpad(flat)
+            text = devectorize_text(unpadded)
+            print("Decrypted (text):")
+            print(text)
+        else:  # numeric
+            bytes_per_number = int(metadata.get("bytes_per_number", block_size))
+            nums = []
+            for dec_blk in decrypted_blocks:
+                b = dec_blk.tobytes()[-bytes_per_number:]
+                v = bytes_be_to_int(b)
+                nums.append(v)
+            print("Decrypted (numeric list):")
+            print(nums)
+    except ValueError as e:
+        print("Decryption failed:", e)
+        print("Possibly corrupted file or invalid padding.")
+        raise
 
-def decrypt_with_public_inn(seed_str: str, enc_file: str):
-    """
-    Decrypt a message encrypted with a public INN using the shared seed string.
-    """
-    # Read encrypted file
-    metadata, enc_seed, enc_blocks = read_ciphertext_json(enc_file)
-    if enc_seed:
-        raise ValueError("File was not encrypted with public INN (contains RSA seed)")
-    if metadata.get("mode") != "text":
-        raise ValueError("Public INN decryption supports text mode only")
-    
-    # Derive INN from seed
-    seed_bytes = seed_str.encode("utf-8")
-    block_size = int(metadata["block_size"])
-    n_layers = int(metadata["n_layers"])
-    modulus = int(metadata["modulus"])
-    inn, layers_flat = derive_inn_from_seed(seed_bytes, block_size, n_layers, modulus)
-    
-    # Decrypt blocks
-    decrypted_blocks = []
-    for blk in enc_blocks:
-        dec = inn.reverse(blk.astype(np.int64)).astype(np.uint8)
-        decrypted_blocks.append(dec)
-    flat = np.concatenate(decrypted_blocks).astype(np.uint8)
-    
-    # Unpad and decode
-    unpadded = pkcs7_unpad(flat)
-    text = devectorize_text(unpadded)
-    print("Decrypted (text):")
-    print(text)
-    return text
 # -----------------------------
-# CLI main
+# CLI main with batch mode support via argparse
 # -----------------------------
 def main():
+    parser = argparse.ArgumentParser(description="VEINN CLI")
+    subparsers = parser.add_subparsers(dest="command")
+
+    # Public encrypt parser
+    pub_enc_parser = subparsers.add_parser("public_encrypt", help="Encrypt with public INN")
+    pub_enc_parser.add_argument("--seed", required=True, help="Public seed string")
+    pub_enc_parser.add_argument("--message", help="Message to encrypt (text mode)")
+    pub_enc_parser.add_argument("--numbers", nargs="+", type=int, help="Numbers to encrypt (numeric mode)")
+    pub_enc_parser.add_argument("--mode", default="text", choices=["text", "numeric"], help="Mode: text or numeric")
+    pub_enc_parser.add_argument("--bytes_per_number", type=int, help="Bytes per number (numeric mode)")
+    pub_enc_parser.add_argument("--block_size", type=int, default=16, help="Block size (even)")
+    pub_enc_parser.add_argument("--n_layers", type=int, default=3, help="Number of layers")
+    pub_enc_parser.add_argument("--modulus", type=int, default=256, help="Modulus")
+    pub_enc_parser.add_argument("--out_file", default="enc_pub_inn.json", help="Output file")
+
+    # Public decrypt parser
+    pub_dec_parser = subparsers.add_parser("public_decrypt", help="Decrypt with public INN")
+    pub_dec_parser.add_argument("--seed", required=True, help="Public seed string")
+    pub_dec_parser.add_argument("--enc_file", default="enc_pub_inn.json", help="Encrypted file")
+
+    args = parser.parse_known_args()[0]  # Parse known to allow interactive fallback
+
+    if args.command == "public_encrypt":
+        encrypt_with_public_inn(args.seed, args.message, args.numbers, args.block_size, args.n_layers, args.modulus, args.out_file, args.mode, args.bytes_per_number)
+        return
+    elif args.command == "public_decrypt":
+        decrypt_with_public_inn(args.seed, args.enc_file)
+        return
+
+    # Interactive mode if no args
     print("VEINN CLI — seed-based public-key hybrid (ephemeral INN seed) + homomorphic ops")
     while True:
         print("")
@@ -717,7 +820,17 @@ def main():
                 print("Public INN derived and ready for deterministic encryption.")
             elif choice == "10":
                 seed_input = input("Enter public seed string: ").strip()
-                in_message = input("Optional message to encrypt (leave blank to prompt): ").strip() or None
+                mode_choice = input("Mode: (t)ext or (n)umeric? [t]: ").strip().lower() or "t"
+                message = None
+                numbers = None
+                bytes_per_number = None
+                if mode_choice == "t":
+                    message = input("Message to encrypt: ")
+                else:
+                    content = input("Enter numbers (comma or whitespace separated): ").strip()
+                    raw_nums = [s for s in content.replace(",", " ").split() if s != ""]
+                    numbers = [int(x) for x in raw_nums]
+                    bytes_per_number = int(input("Bytes per number (default 1): ").strip() or 1)
                 block_size = int(input("Block size (even, default 16): ").strip() or 16)
                 if block_size % 2 != 0:
                     print("Block size must be even")
@@ -725,7 +838,7 @@ def main():
                 n_layers = int(input("Number of INN layers (default 3): ").strip() or 3)
                 modulus = int(input("Modulus (default 256): ").strip() or 256)
                 out_file = input("Output encrypted filename (default enc_pub_inn.json): ").strip() or "enc_pub_inn.json"
-                encrypt_with_public_inn(seed_input, in_message, block_size, n_layers, modulus, out_file)
+                encrypt_with_public_inn(seed_input, message, numbers, block_size, n_layers, modulus, out_file, mode_choice, bytes_per_number)
             elif choice == "11":
                 seed_input = input("Enter public seed string: ").strip()
                 enc_file = input("Encrypted file to decrypt (default enc_pub_inn.json): ").strip() or "enc_pub_inn.json"
