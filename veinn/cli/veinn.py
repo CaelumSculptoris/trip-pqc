@@ -600,7 +600,7 @@ def homomorphic_sub_files(f1: str, f2: str, out_file: str, binary: bool = False)
     if len(enc1) != len(enc2):
         raise ValueError("Encrypted files must have same number of blocks")
     modulus = meta1["modulus"]
-    diff = [((a - b) % modulus).astype(np.int64) for a, b in zip(enc1, ec2)]
+    diff = [((a - b) % modulus).astype(np.int64) for a, b in zip(enc1, enc2)]
     _write_encrypted_payload(out_file, diff, meta1, binary)
     print(f"Homomorphic difference saved to {out_file}")
 
