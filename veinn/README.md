@@ -88,8 +88,9 @@ Cryptographers, security researchers, and ML specialists are invited to:
 
 ---
 ## Notes:
-- After feedback from the crypto community it was made clear that I'm completely out of my element and categorically wrong about my ideas. Therefore I am abandoning this repo.
-
+- python3 -m venv veinn
+- source bin/activate
+- pip install torch
 
 ## License
 [MIT License](https://opensource.org/license/mit)  
