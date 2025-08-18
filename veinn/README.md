@@ -1,96 +1,144 @@
 ![alt text](veinn.jpg "But you have heard of me.")
-# VEINN – Vector Encrypted Invertible Neural Network
+# VEINN: Hybrid Non-linear Invertible Neural Network Encryption
 
-## Overview
-**VEINN** is an experimental **post-quantum symmetric encryption** framework that transforms plaintext into **continuous high-dimensional vectors** and applies **key-derived, nonlinear, invertible transformations** using affine coupling layers.  
-Deterministic noise is injected at each layer, creating a **polymorphic** encryption process that is tunable for complexity, scalability, and security research.
+**VEINN (v3 Hybrid)** is a cryptographic tool that combines a non-linear Invertible Neural Network (INN) with ChaCha20-Poly1305 for secure seed encryption and HMAC-SHA256 for ciphertext authentication. It supports RSA hybrid encryption, Paillier homomorphic operations, and an encrypted keystore for key management. The system is designed for both text and numeric data, with a focus on invertibility for reversible transformations and non-linearity to resist linear cryptanalysis.
 
-> ⚠ **Disclaimer:** VEINN is an experimental research framework.  
-> It has not undergone formal cryptographic analysis.  
-> Do **not** use in production systems.
+## Features
 
----
+- **Non-linear INN Encryption**: Encrypts data using an invertible neural network with multiplicative scalars and permutations in a 256-bit prime field, aiming for IND-CPA security.
+- **ChaCha20-Poly1305**: Secures the INN seed in RSA hybrid mode with IND-CCA2 security.
+- **HMAC-SHA256**: Authenticates ciphertext, metadata, nonce, and timestamp.
+- **RSA Hybrid Encryption**: Securely exchanges INN seeds using RSA with ChaCha20-Poly1305.
+- **Paillier Homomorphic Encryption**: Supports homomorphic addition on encrypted numbers.
+- **Encrypted Keystore**: Stores RSA private keys, Paillier keys, and INN seeds securely.
+- **Modes**: Supports text (PKCS7-padded) and numeric (block-based) encryption.
+- **Nonce and Timestamp**: Ensures uniqueness and replay protection.
+- **CLI Interface**: Interactive and batch modes for all operations.
 
-## Key Features
-- **Continuous Vector Space Encryption** – Plaintext is vectorized into the range `[-1, 1]`, avoiding purely discrete-space transformations.
-- **Invertible Neural Network (INN) Layers** – Uses affine coupling layers for reversible, nonlinear transformations.
-- **Layer-Level Deterministic Noise** – Adds key-derived, reproducible noise at each stage for complexity without losing reversibility.
-- **Polymorphism** – Structure and parameters can change per key or per session.
-- **Tunable Scalability** – Adjust vector dimensions, number of layers, and noise parameters for security and performance trade-offs.
-- **Simple File-Based Persistence** – Save/load encrypted vectors and associated keys for testing and analysis.
-- **Benchmark & Test Tools** – Measure reconstruction accuracy, speed, and transformation complexity.
+## Installation
 
----
+### Prerequisites
+- Python 3.8+
+- Required libraries:
+  ```bash
+  pip install cryptography phe numpy
+  ```
 
-## Motivation
-Post-quantum cryptography (PQC) often focuses on **lattice-based** or **code-based** schemes in **discrete spaces**.  
-VEINN explores an alternative: **embedding messages in continuous vector spaces** and transforming them with **key-dependent nonlinear mappings**.  
-This creates a novel hardness layer that scales with:
-- Vector dimension
-- Number of INN layers
-- Noise characteristics
+### Setup
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/CaelumSculptoris/veinn.git
+   cd veinn
+   ```
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Ensure `veinn.py` is executable:
+   ```bash
+   chmod +x veinn.py
+   ```
 
----
+## Usage
 
-## How It Works
-### 1. Vectorization
-- Convert UTF-8 plaintext to Base64
-- Map bytes to floats in `[-1, 1]`
-- Pad to an even dimension if needed
+### Interactive Mode
+Run the script to access the CLI menu:
+```bash
+./veinn.py
+```
+Options:
+1. Create encrypted keystore
+2. Generate RSA keypair
+3. Generate Paillier keypair
+4. Encrypt with RSA public key (RSA + INN + ChaCha20-Poly1305)
+5. Decrypt with RSA private key
+6. Encrypt with public INN (seed-based)
+7. Decrypt with public INN
+8. Paillier encrypt numbers
+9. Paillier decrypt numbers
+10. Homomorphic addition (Paillier)
+0. Exit
 
-### 2. Layered Encryption
-For each INN layer:
-1. **Key-derived parameters** (`scale`, `shift`) generated via SHA-256.
-2. **Affine coupling transformation** applied to half the vector.
-3. **Deterministic noise** injected (same noise is removed during decryption).
+### Batch Mode Examples
 
-### 3. Decryption
-- Reverse the process, removing noise and applying inverse affine couplings in reverse order.
+#### Create Keystore
+```bash
+./veinn.py create_keystore --passphrase "mysecret" --keystore_file keystore.json
+```
 
----
+#### Generate RSA Keypair
+```bash
+./veinn.py generate_rsa --bits 2048 --pubfile rsa_pub.json --privfile rsa_priv.json
+```
+With keystore:
+```bash
+./veinn.py generate_rsa --bits 2048 --pubfile rsa_pub.json --keystore keystore.json --passphrase "mysecret" --key_name rsa_key
+```
 
-## Example Usage
-### Encrypt & Save
+#### Encrypt with RSA Public Key
+Text mode:
+```bash
+./veinn.py rsa_encrypt --pubfile rsa_pub.json --message "Hello, World!" --mode text --out_file enc.bin --binary
+```
+Numeric mode:
+```bash
+./veinn.py rsa_encrypt --pubfile rsa_pub.json --numbers 42 123 999 --mode numeric --bytes_per_number 4 --out_file enc.json
+```
 
-    python3 cli/veinn.py  
+#### Decrypt with RSA Private Key
+```bash
+./veinn.py rsa_decrypt --privfile rsa_priv.json --enc_file enc.bin
+```
+With keystore:
+```bash
+./veinn.py rsa_decrypt --keystore keystore.json --passphrase "mysecret" --key_name rsa_key --enc_file enc.json
+```
 
-1. Select **Encrypt & save**  
-2. Enter your message  
-3. Choose number of layers (default: 10)  
-4. Provide filename to store encrypted vector  
-5. Copy the hex key shown – this is required for decryption  
+#### Public INN Encryption
+```bash
+./veinn.py public_encrypt --seed "myseed" --message "Secret message" --mode text --out_file enc_pub.json
+```
 
-### Load & Decrypt
-    
-    python3 cli/veinn.py  
+#### Paillier Encryption
+```bash
+./veinn.py paillier_encrypt --pubfile paillier_pub.bin --numbers 10 20 30 --out_file paillier_enc.bin --binary
+```
 
-1. Select **Load & decrypt**  
-2. Provide encrypted vector filename  
-3. Enter number of layers used during encryption  
-4. View reconstructed plaintext  
+#### Homomorphic Addition
+```bash
+./veinn.py hom_add --file1 paillier_enc1.bin --file2 paillier_enc2.bin --paillier_pubfile paillier_pub.bin --out_file hom_add.bin --binary
+```
 
----
+### File Formats
+- **JSON**: Human-readable output (default).
+- **Binary**: Compact storage using pickle (use `--binary`).
 
-## Research Notes
-- **Symmetric by design** – immune to Shor’s algorithm in the same way as AES (given sufficient key size).
-- **Polymorphism** – structure and transformations change per session or per key.
-- **Scalable hardness** – increase layers, vector dimension, and noise level to increase complexity.
-- **Hybrid potential** – could be combined with lattice-based PQC (e.g., Kyber) to protect the VEINN key.
+## Security Considerations
+- **Non-linear INN**: Aims for IND-CPA security with non-linear transformations (multiplicative scalars, permutations) in a 256-bit prime field. Lacks formal cryptanalysis; use with caution in production.
+- **ChaCha20-Poly1305**: Provides IND-CCA2 security for seed encryption in RSA hybrid mode.
+- **HMAC-SHA256**: Ensures ciphertext and metadata integrity but does not provide IND-CCA2 for data encryption.
+- **Nonce Management**: Uses 16-byte nonces for INN and 12-byte nonces for ChaCha20-Poly1305, with timestamp validation to prevent reuse.
+- **Key Storage**: Use the encrypted keystore for secure key management. Protect the passphrase.
+- **Paillier**: Secure for homomorphic addition but requires careful key management.
 
----
+**Warning**: The INN is a custom construction and not formally vetted. For production systems, consider standard ciphers (e.g., ChaCha20-Poly1305 alone) unless invertibility or homomorphic properties are required.
+
+## Technical Details
+- **Non-linear INN**:
+  - Block size: 16 bytes (configurable, must be even).
+  - Layers: 8 (configurable).
+  - Prime field: 256-bit prime.
+  - Operations: Matrix multiplications, multiplicative scalars, and permutations derived via HKDF.
+- **Key Derivation**: HKDF-SHA256 derives separate keys for INN encryption, HMAC authentication, and ChaCha20-Poly1305 seed encryption.
+- **Invertibility**: The INN ensures reversible transformations for both text and numeric modes.
+- **Dependencies**: `cryptography`, `phe`, `numpy`.
 
 ## Contributing
-Cryptographers, security researchers, and ML specialists are invited to:
-- Explore alternative invertible layers
-- Suggest new noise injection methods
-- Analyze attack surfaces
-- Provide formal security proofs
-
----
-## Notes:
-- python3 -m venv veinn
-- source bin/activate
-- pip install torch
+Contributions are welcome! Please submit pull requests or open issues for:
+- Performance optimizations (e.g., Cython for INN).
+- Additional homomorphic schemes (e.g., BFV, CKKS).
+- Formal cryptanalysis of the INN.
+- Bug fixes or feature enhancements.
 
 ## License
-[MIT License](https://opensource.org/license/mit)  
+MIT License. See [LICENSE](LICENSE) for details.
