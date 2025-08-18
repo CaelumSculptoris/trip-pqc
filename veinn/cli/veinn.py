@@ -993,7 +993,7 @@ def main():
                     elif choice == "2":
                         bits = int(input("RSA key size in bits (default 2048): ").strip() or 2048)
                         pubfile = input("Public key filename (default rsa_pub.json): ").strip() or "rsa_pub.json"
-                        use_keystore = input("Store private key in keystore? (y/n): ").strip().lower() == "y"
+                        use_keystore = input("Store private key in keystore? (y/n): ").strip().lower() or "y"
                         privfile, passphrase, key_name = None, None, None
                         if use_keystore:
                             keystore = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
