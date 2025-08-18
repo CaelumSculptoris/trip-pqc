@@ -150,3 +150,43 @@ MIT License. See [LICENSE](LICENSE) for details.
    - veinn-lwe.py (Lattice based INN) <-- Currently my ideal approach, but unstable
    - veinn-rsa.py (RSA, OAEP, HMAC, PBKDF2)
    - veinn.py (Stable)
+
+## Lattice Based INN
+Instead of the INN operating on a simple vector of integers, redefine its state and operations to exist within the mathematical framework of a lattice.
+This isn't about simply building an INN on top of a lattice-based encryption scheme; it's about making the INN be the encryption scheme itself. The INN's architecture, with its invertible coupling layers, lends itself well to the structure of lattice-based cryptography, which is inherently reversible.
+
+## The Lattice-Based INN (L-INN)
+In this approach, a vector of numbers is no longer the plaintext. Instead, plaintext is a vector of small integers, and its encryption is a point in a high-dimensional lattice. The "encryption" operation is a carefully chosen, noisy transformation that makes it hard to find the original plaintext vector without the secret key. The "INN" would be the mechanism that performs this transformation and its inverse.
+
+## Lattice-Based INN Refactor
+ * Plaintext and Keyspace:
+   * Plaintext: The message would be a vector of small integers, say from \{0, 1\}.
+   * Secret Key: The secret key would be a private matrix \mathbf{S} and a private vector \mathbf{s}.
+   * Public Key: The public key would be a matrix \mathbf{A} and a vector \mathbf{b} such that \mathbf{b} = \mathbf{A}\mathbf{S} + \mathbf{s} + \mathbf{e} \pmod q, where \mathbf{e} is a small "error" vector. This is the core principle of Learning with Errors (LWE), the foundation of most modern lattice-based cryptography.
+ * Encryption (The Forward Pass):
+   * The IntINN's forward pass (forward method) would be replaced by the lattice-based encryption function.
+   * To encrypt a message vector \mathbf{m}, you would choose a random "masking" vector \mathbf{r}. The ciphertext would be a pair of vectors, (\mathbf{c}_1, \mathbf{c}_2).
+   * \mathbf{c}_1 = \mathbf{A}^T\mathbf{r} + \mathbf{e}_1 \pmod q
+   * \mathbf{c}_2 = \mathbf{b}^T\mathbf{r} + \mathbf{m} + \mathbf{e}_2 \pmod q
+   * Here, \mathbf{A}, \mathbf{b} are the public key, and \mathbf{e}_1, \mathbf{e}_2 are small random error vectors. These error vectors are crucial for security and are what make the scheme "noisy." This noise is a feature, not a bug, and is the source of the scheme's security.
+ * Decryption (The Reverse Pass):
+   * The IntINN's reverse pass (reverse method) would become the decryption function.
+   * To decrypt (\mathbf{c}_1, \mathbf{c}_2), you would use the secret key \mathbf{S}.
+   * The decryption operation would be \mathbf{m}' = \mathbf{c}_2 - \mathbf{S}^T\mathbf{c}_1 \pmod q.
+   * By substituting the expressions for \mathbf{c}_1 and \mathbf{c}_2, you'd find that the errors cancel out (up to a small value), and the result is the original message \mathbf{m} plus a small noise term. If the noise is small enough, you can round the result to recover the exact message.
+ * Homomorphic Operations:
+   * Making the INN a lattice automatically gives you homomorphic properties. The forward and reverse passes are no longer limited to simple modular arithmetic. You'd now have built-in homomorphic addition and scalar multiplication.
+   * Homomorphic Addition: To add two encrypted messages, you simply add their ciphertext vectors:
+     * (\mathbf{c}_{1a}, \mathbf{c}_{2a}) + (\mathbf{c}_{1b}, \mathbf{c}_{2b}) = (\mathbf{c}_{1a} + \mathbf{c}_{1b}, \mathbf{c}_{2a} + \mathbf{c}_{2b}) \pmod q.
+   * Homomorphic Scalar Multiplication: To multiply a ciphertext by a scalar c:
+     * c \cdot (\mathbf{c}_1, \mathbf{c}_2) = (c\mathbf{c}_1, c\mathbf{c}_2) \pmod q.
+   * Your homomorphic functions would just call these native operations.
+
+## L-INN Advantages
+ * Provable Security: Lattice-based cryptography's security is based on the worst-case hardness of lattice problems, such as the Shortest Vector Problem (SVP). This means that if an attacker could break your encryption, they would be able to solve a fundamental hard problem in mathematics.
+ * Post-Quantum Secure: The underlying hard problems are known to be resistant to quantum computers, making the L-INN inherently Shor- and Grover-hard.
+ * Fully Homomorphic Encryption (FHE): While the basic LWE scheme supports addition and scalar multiplication, extensions like the Ring-LWE (RLWE) variant and the Brakerski-Gentry-Vaikuntanathan (BGV) scheme can enable fully homomorphic encryption, allowing for an unlimited number of homomorphic operations. This would make your homomorphic functions much more powerful.
+ * Invertible by Design: The encryption process itself is a transformation that is efficiently invertible only with the secret key, aligning perfectly with the core concept of an "Invertible Neural Network."
+
+In essence, making the INN a lattice means building a custom, highly specialized version of a well-established lattice-based encryption scheme, but framed within the invertible network structure that is central to the VEINN name, replacing the simple modular arithmetic with the more sophisticated and secure mathematics of lattices.
+It transforms the INN from a simple symmetric cipher into a powerful, quantum-secure homomorphic encryption primitive... ideally. Hopefully.
