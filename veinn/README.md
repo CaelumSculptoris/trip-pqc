@@ -142,3 +142,11 @@ Contributions are welcome! Please submit pull requests or open issues for:
 
 ## License
 MIT License. See [LICENSE](LICENSE) for details.
+
+## Notes
+- In Progress
+   - veinn-ckks.py (Leveraging CKKS homomorphism)
+   - veinn-hmac.py (non-linear INN + ChaCha20-Poly1305 + HMAC)
+   - veinn-lwe.py (Lattice based INN) <-- Currently my ideal approach, but unstable
+   - veinn-rsa.py (RSA, OAEP, HMAC, PBKDF2)
+   - veinn.py (Stable)

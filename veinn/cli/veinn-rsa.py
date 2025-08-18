@@ -1060,7 +1060,7 @@ def main():
                         nonce = b64decode(nonce_str) if nonce_str else None
                         encrypt_with_pub(pubfile, in_path=inpath, mode=mode, block_size=block_size, n_layers=n_layers, modulus=modulus, seed_len=seed_len, binary=binary, nonce=nonce)
                     elif choice == "4":
-                        use_keystore = input("Use keystore for private key? (y/n): ").strip().lower() == "y" or True
+                        use_keystore = input("Use keystore for private key? (y/n): ").strip().lower() == "y"
                         privfile, keystore, passphrase, key_name = None, None, None, None
                         if use_keystore:
                             keystore = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
@@ -1087,28 +1087,28 @@ def main():
                         f1 = input("Encrypted file 1: ").strip()
                         f2 = input("Encrypted file 2: ").strip()
                         out = input("Output filename (default hom_sub.json): ").strip() or "hom_sub.json"
-                        binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y" or False
+                        binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y"
                         homomorphic_sub_files(f1, f2, out, binary)
                     elif choice == "7":
                         f = input("Encrypted file: ").strip()
                         scalar = int(input("Scalar (integer): ").strip())
                         out = input("Output filename (default hom_mul.json): ").strip() or "hom_mul.json"
-                        binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y" or False
+                        binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y"
                         homomorphic_scalar_mul_file(f, scalar, out, binary)
                     elif choice == "8":
                         files = input("Comma-separated encrypted files to average: ").strip().split(",")
                         files = [s.strip() for s in files if s.strip()]
                         out = input("Output filename (default hom_avg.json): ").strip() or "hom_avg.json"
-                        binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y" or False
+                        binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y"
                         homomorphic_average_files(files, out, binary)
                     elif choice == "9":
                         f1 = input("Encrypted file 1: ").strip()
                         f2 = input("Encrypted file 2: ").strip()
                         out = input("Output filename (default hom_dot.json): ").strip() or "hom_dot.json"
-                        binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y" or False
+                        binary = input("Use binary output? (y/n, default n): ").strip().lower() == "y"
                         homomorphic_dot_files(f1, f2, out, binary)
                     elif choice == "10":
-                        use_keystore = input("Use keystore for seed? (y/n): ").strip().lower() == "y" or True
+                        use_keystore = input("Use keystore for seed? (y/n): ").strip().lower() == "y"
                         seed_input, keystore, passphrase, key_name = None, None, None, None
                         if use_keystore:
                             keystore = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
@@ -1126,7 +1126,7 @@ def main():
                         modulus = int(input("Modulus (default 256): ").strip() or 256)
                         public_inn_from_seed(seed_input, block_size, n_layers, modulus)
                     elif choice == "11":
-                        use_keystore = input("Use keystore for seed? (y/n): ").strip().lower() == "y" or True
+                        use_keystore = input("Use keystore for seed? (y/n): ").strip().lower() == "y"
                         seed_input, keystore, passphrase, key_name = None, None, None, None
                         if use_keystore:
                             keystore = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
@@ -1161,7 +1161,7 @@ def main():
                         if use_keystore:
                             store_key_in_keystore(passphrase, key_name, {"seed": seed_input}, keystore)
                     elif choice == "12":
-                        use_keystore = input("Use keystore for seed? (y/n): ").strip().lower() == "y" or True
+                        use_keystore = input("Use keystore for seed? (y/n): ").strip().lower() == "y"
                         seed_input, keystore, passphrase, key_name = None, None, None, None
                         if use_keystore:
                             keystore = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
