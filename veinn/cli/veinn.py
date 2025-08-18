@@ -686,6 +686,7 @@ def encrypt_with_pub(pubfile: str, in_path: str = None, message: str = None, num
     n = int(pub["n"])
     e = int(pub["e"])
     k = (n.bit_length() + 7) // 8
+    
     if in_path and message is None and numbers is None:
         with open(in_path, "r", encoding="utf-8") as f:
             content = f.read().strip()
@@ -694,6 +695,7 @@ def encrypt_with_pub(pubfile: str, in_path: str = None, message: str = None, num
         else:
             raw_nums = [s for s in content.replace(",", " ").split() if s != ""]
             numbers = [int(x) for x in raw_nums]
+
     if mode == "text":
         if message is None:
             message = input("Message to encrypt: ")
@@ -715,14 +717,23 @@ def encrypt_with_pub(pubfile: str, in_path: str = None, message: str = None, num
             if len(b) < block_size:
                 b = (b"\x00" * (block_size - len(b))) + b
             blocks.append(np.frombuffer(b, dtype=np.uint8))
+    
+    # Generate ephemeral seed for INN encryption.
     seed = secrets.token_bytes(seed_len)
     inn, layers_flat = derive_inn_from_seed(seed, block_size, n_layers, modulus)
+    
+    # Encrypt the plaintext blocks with the INN.
     enc_blocks = [inn.forward(blk.astype(np.int64)) for blk in blocks]
+    
+    # Use OAEP to encrypt the ephemeral seed with the recipient's public key.
     padded_seed = oaep_encode(seed, k, hash_func=sha256)
     enc_seed_int = pow(bytes_be_to_int(padded_seed), e, n)
     enc_seed_bytes = int_to_bytes_be(enc_seed_int, k)
+    
+    # Use a separate, random nonce for each encryption to prevent replay attacks.
     nonce = nonce or secrets.token_bytes(16)
     timestamp = time.time()
+
     metadata = {
         "block_size": block_size,
         "n_layers": n_layers,
@@ -732,24 +743,35 @@ def encrypt_with_pub(pubfile: str, in_path: str = None, message: str = None, num
     }
     if mode == "numeric":
         metadata["bytes_per_number"] = bytes_per_number
-    hmac_key = expand_keystream(seed + b'hmac', 32)
-    temp_payload = {
-        "inn_metadata": metadata,
-        "enc_seed": [int(b) for b in enc_seed_bytes],
-        "encrypted": [[int(x) for x in blk.tolist()] for blk in enc_blocks],
-        "nonce": [int(b) for b in nonce],
-        "timestamp": timestamp
-    }
-    payload_str = json.dumps(temp_payload, sort_keys=True)
-    hmac_value = hmac.new(hmac_key, payload_str.encode(), hashlib.sha256).hexdigest()
+    
+    # Derive a separate HMAC key from the seed for integrity.
+    hmac_key = expand_keystream(seed + b'hmac_key', 32)
+
+    # Serialize the components to be authenticated into a canonical byte string.
+    # It's critical that the order is fixed for MAC verification.
+    # Using a JSON dump here for simplicity, but for true canonical representation,
+    # a custom serializer would be better.
+    mac_data = json.dumps({
+        "metadata": metadata,
+        "seed": enc_seed_bytes.hex(),
+        "nonce": nonce.hex(),
+        "timestamp": timestamp,
+        "encrypted_blocks": [[int(x) for x in blk.tolist()] for blk in enc_blocks]
+    }, sort_keys=True).encode('utf-8')
+
+    hmac_value = hmac.new(hmac_key, mac_data, hashlib.sha256).hexdigest()
+    
     if out_file is None:
         out_file = input("Output encrypted filename (default enc_pub.json): ").strip() or "enc_pub.json"
     if binary and not out_file.endswith(".bin"):
         out_file = out_file.replace(".json", ".bin") if out_file.endswith(".json") else out_file + ".bin"
+    
+    # The final payload includes the encrypted seed, the encrypted blocks, and the HMAC.
     if binary:
         write_ciphertext_binary(out_file, enc_blocks, metadata, enc_seed_bytes, hmac_value, nonce, timestamp)
     else:
         write_ciphertext_json(out_file, enc_blocks, metadata, enc_seed_bytes, hmac_value, nonce, timestamp)
+    
     print(f"Encrypted message (with RSA-encrypted seed) saved to {out_file}")
     return out_file
 
@@ -766,28 +788,45 @@ def decrypt_with_priv(keysfile: str, privfile: str, enc_file: str, passphrase: s
     d = int(priv["d"])
     n = int(priv["n"])
     k = (n.bit_length() + 7) // 8
+    
     metadata, enc_seed_bytes, enc_blocks, hmac_value, nonce, timestamp = read_ciphertext(enc_file)
+    
     if not validate_timestamp(timestamp, validity_window):
         raise ValueError("Timestamp expired or invalid")
-    seed_bytes = oaep_decode(int_to_bytes_be(pow(bytes_be_to_int(enc_seed_bytes), d, n), k), k, hash_func=sha256)
-    hmac_key = expand_keystream(seed_bytes + b'hmac', 32)
-    temp_payload = {
-        "inn_metadata": metadata,
-        "enc_seed": [int(b) for b in enc_seed_bytes],
-        "encrypted": [[int(x) for x in blk.tolist()] for blk in enc_blocks],
-        "nonce": [int(b) for b in nonce] if nonce else [],
-        "timestamp": timestamp
-    }
-    payload_str = json.dumps(temp_payload, sort_keys=True)
-    computed_hmac = hmac.new(hmac_key, payload_str.encode(), hashlib.sha256).hexdigest()
+
+    # Decrypt the seed first to get the HMAC key.
+    try:
+        seed_bytes = oaep_decode(int_to_bytes_be(pow(bytes_be_to_int(enc_seed_bytes), d, n), k), k, hash_func=sha256)
+    except ValueError as e:
+        raise ValueError("Failed to decrypt ephemeral seed. Wrong private key or corrupted file.") from e
+
+    # Derive the HMAC key from the decrypted seed.
+    hmac_key = expand_keystream(seed_bytes + b'hmac_key', 32)
+
+    # Reconstruct the authenticated data exactly as it was during encryption.
+    mac_data = json.dumps({
+        "metadata": metadata,
+        "seed": enc_seed_bytes.hex(),
+        "nonce": nonce.hex(),
+        "timestamp": timestamp,
+        "encrypted_blocks": [[int(x) for x in blk.tolist()] for blk in enc_blocks]
+    }, sort_keys=True).encode('utf-8')
+    
+    computed_hmac = hmac.new(hmac_key, mac_data, hashlib.sha256).hexdigest()
+    
+    # CRITICAL: Verify the HMAC before attempting decryption.
     if hmac_value != computed_hmac:
-        raise ValueError("HMAC verification failed: Possibly tampered file, wrong private key, or invalid nonce/timestamp")
+        raise ValueError("HMAC verification failed: Possibly tampered file or wrong private key.")
+
+    # Only if HMAC is valid, proceed with message decryption.
     block_size = int(metadata["block_size"])
     n_layers = int(metadata["n_layers"])
     modulus = int(metadata["modulus"])
+    
     inn, layers_flat = derive_inn_from_seed(seed_bytes, block_size, n_layers, modulus)
     decrypted_blocks = [inn.reverse(blk.astype(np.int64)).astype(np.uint8) for blk in enc_blocks]
     flat = np.concatenate(decrypted_blocks).astype(np.uint8)
+    
     mode = metadata.get("mode", "text")
     try:
         if mode == "text":
