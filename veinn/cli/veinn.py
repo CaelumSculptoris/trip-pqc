@@ -282,7 +282,7 @@ def _load_encrypted_file(enc_file: str):
         "layers_per_round": int(metadata["layers_per_round"]),
         "shuffle_stride": int(metadata["shuffle_stride"]),
         "use_lwe": metadata["use_lwe"],
-        "mode": metadata.get("mode", "numeric"),
+        "mode": metadata.get("mode", "n"),
         "bytes_per_number": int(metadata.get("bytes_per_number", metadata.get("n", 4) * 2))
     }
     return enc_blocks, meta_parsed, hmac_value, nonce, timestamp
@@ -295,7 +295,7 @@ def _write_encrypted_payload(out_file: str, enc_blocks, meta, hmac_value: str = 
             "layers_per_round": int(meta["layers_per_round"]),
             "shuffle_stride": int(meta["shuffle_stride"]),
             "use_lwe": meta["use_lwe"],
-            "mode": meta.get("mode", "numeric"),
+            "mode": meta.get("mode", "n"),
             "bytes_per_number": int(meta.get("bytes_per_number", meta["n"] * 2))
         },
         "enc_seed": [],
@@ -510,7 +510,7 @@ def veinn_from_seed(seed_input: str, vp: VeinnParams):
     k = key_from_seed(seed, vp)
     print(f"Derived VEINN key with params: n={vp.n}, rounds={vp.rounds}, layers_per_round={vp.layers_per_round}, shuffle_stride={vp.shuffle_stride}, use_lwe={vp.use_lwe}")
 
-def encrypt_with_pub(pubfile: str, message: Optional[str] = None, numbers: Optional[list] = None, in_path: Optional[str] = None, mode: str = "text", vp: VeinnParams = VeinnParams(), seed_len: int = 32, nonce: Optional[bytes] = None, out_file: str = "enc_pub.json") -> str:
+def encrypt_with_pub(pubfile: str, message: Optional[str] = None, numbers: Optional[list] = None, in_path: Optional[str] = None, mode: str = "t", vp: VeinnParams = VeinnParams(), seed_len: int = 32, nonce: Optional[bytes] = None, out_file: str = "enc_pub.json") -> str:
     with open(pubfile, "r") as f:
         pub = json.load(f)
     n = pub["n"]
@@ -518,7 +518,7 @@ def encrypt_with_pub(pubfile: str, message: Optional[str] = None, numbers: Optio
     if in_path:
         with open(in_path, "rb") as f:
             message_bytes = f.read()
-    elif mode == "text":
+    elif mode == "t":
         if not message:
             raise ValueError("Message required for text mode")
         message_bytes = message.encode('utf-8')
@@ -587,8 +587,8 @@ def decrypt_with_priv(keystore: Optional[str], privfile: Optional[str], encfile:
     dec_blocks = [permute_inverse(b, k) for b in enc_blocks]
     dec_bytes = b"".join(block_to_bytes(b) for b in dec_blocks)
     dec_bytes = pkcs7_unpad(dec_bytes)
-    mode = metadata.get("mode", "numeric")
-    if mode == "text":
+    mode = metadata.get("mode", "n")
+    if mode == "t":
         print("Decrypted message:", dec_bytes.decode('utf-8'))
     else:
         bytes_per_number = metadata.get("bytes_per_number", vp.n * 2)
@@ -596,10 +596,10 @@ def decrypt_with_priv(keystore: Optional[str], privfile: Optional[str], encfile:
                    for i in range(0, len(dec_bytes), bytes_per_number)]
         print("Decrypted numbers:", numbers)
 
-def encrypt_with_public_veinn(seed_input: str, message: Optional[str] = None, numbers: Optional[list] = None, vp: VeinnParams = VeinnParams(), out_file: str = "enc_pub_veinn.json", mode: str = "text", bytes_per_number: Optional[int] = None, nonce: Optional[bytes] = None) -> str:
+def encrypt_with_public_veinn(seed_input: str, message: Optional[str] = None, numbers: Optional[list] = None, vp: VeinnParams = VeinnParams(), out_file: str = "enc_pub_veinn.json", mode: str = "t", bytes_per_number: Optional[int] = None, nonce: Optional[bytes] = None) -> str:
     seed = seed_input.encode('utf-8')
     k = key_from_seed(seed, vp)
-    if message or mode == "text":
+    if message or mode == "t":
         if not message:
             raise ValueError("Message required for text mode")
         message_bytes = message.encode('utf-8')
@@ -652,8 +652,8 @@ def decrypt_with_public_veinn(seed_input: str, enc_file: str, validity_window: i
     dec_blocks = [permute_inverse(b, k) for b in enc_blocks]
     dec_bytes = b"".join(block_to_bytes(b) for b in dec_blocks)
     dec_bytes = pkcs7_unpad(dec_bytes)
-    mode = metadata.get("mode", "numeric")
-    if mode == "text":
+    mode = metadata.get("mode", "n")
+    if mode == "t":
         print("Decrypted message:", dec_bytes.decode('utf-8'))
     else:
         bytes_per_number = metadata.get("bytes_per_number", vp.n * 2)
@@ -727,7 +727,7 @@ def main():
     public_encrypt_parser = subparsers.add_parser("public_encrypt", help="Encrypt with public key (RSA + VEINN)")
     public_encrypt_parser.add_argument("--pubfile", default="rsa_pub.json", help="RSA public key file")
     public_encrypt_parser.add_argument("--in_path", help="Input file path")
-    public_encrypt_parser.add_argument("--mode", choices=["text", "numeric"], default="text", help="Input mode")
+    public_encrypt_parser.add_argument("--mode", choices=["t", "n"], default="t", help="Input mode")
     public_encrypt_parser.add_argument("--n", type=int, default=8, help="Number of uint16 words per block")
     public_encrypt_parser.add_argument("--rounds", type=int, default=3, help="Number of rounds")
     public_encrypt_parser.add_argument("--layers_per_round", type=int, default=2, help="Layers per round")
@@ -864,7 +864,7 @@ def main():
                             print("Public key not found. Generate RSA keys first.")
                             continue
                         inpath = input("Optional input file path (blank = prompt): ").strip() or None
-                        mode = input("Mode: (t)ext or (n)umeric? [t]: ").strip().lower() or "text"
+                        mode = input("Mode: (t)ext or (n)umeric? [t]: ").strip().lower() or "t"
                         n = int(input("Number of uint16 words per block (default 8): ").strip() or 8)
                         rounds = int(input("Number of rounds (default 3): ").strip() or 3)
                         layers_per_round = int(input("Layers per round (default 2): ").strip() or 2)
@@ -878,7 +878,7 @@ def main():
                         message = None
                         numbers = None
                         if inpath is None:
-                            if mode == "text":
+                            if mode == "t":
                                 message = input("Message to encrypt: ")
                             else:
                                 content = input("Enter numbers (comma or whitespace separated): ").strip()
@@ -940,11 +940,11 @@ def main():
                             seed_input = seed_data["seed"]
                         else:
                             seed_input = input("Enter public seed string: ").strip()
-                        mode = input("Mode: (t)ext or (n)umeric? [t]: ").strip().lower() or "text"
+                        mode = input("Mode: (t)ext or (n)umeric? [t]: ").strip().lower() or "t"
                         message = None
                         numbers = None
                         bytes_per_number = None
-                        if mode == "text":
+                        if mode == "t":
                             message = input("Message to encrypt: ")
                         else:
                             content = input("Enter numbers (comma or whitespace separated): ").strip()

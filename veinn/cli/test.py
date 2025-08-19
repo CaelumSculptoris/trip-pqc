@@ -161,16 +161,16 @@ def main():
     # 3) Encrypt with recipient public key (RSA + VEINN) — text mode
     results.append(run_case(TestCase(
         name="3) Public encrypt (RSA+VEINN) — text",
-        params={"pubfile": pubfile, "mode": "text", "message": message_text, "out_file": enc_pub_text, "VeinnParams": asdict(vp)},
-        runner=lambda: encrypt_with_pub(pubfile, message=message_text, mode="text", vp=vp, out_file=enc_pub_text),
+        params={"pubfile": pubfile, "mode": "t", "message": message_text, "out_file": enc_pub_text, "VeinnParams": asdict(vp)},
+        runner=lambda: encrypt_with_pub(pubfile, message=message_text, mode="t", vp=vp, out_file=enc_pub_text),
         validator=lambda out_path: file_exists(out_path) and "encrypted" in json.load(open(out_path)),
     )))
 
     # 3b) Public encrypt (RSA+VEINN) — numeric mode
     results.append(run_case(TestCase(
         name="3b) Public encrypt (RSA+VEINN) — numeric",
-        params={"pubfile": pubfile, "mode": "numeric", "numbers": numbers1, "out_file": enc_pub_num_1, "VeinnParams": asdict(vp)},
-        runner=lambda: encrypt_with_pub(pubfile, numbers=numbers1, mode="numeric", vp=vp, out_file=enc_pub_num_1),
+        params={"pubfile": pubfile, "mode": "n", "numbers": numbers1, "out_file": enc_pub_num_1, "VeinnParams": asdict(vp)},
+        runner=lambda: encrypt_with_pub(pubfile, numbers=numbers1, mode="n", vp=vp, out_file=enc_pub_num_1),
         validator=lambda out_path: file_exists(out_path) and "encrypted" in json.load(open(out_path)),
     )))
 
@@ -218,8 +218,8 @@ def main():
 
     # 8) Encrypt deterministically using public VEINN — text & numeric (two files with same seed should match enc blocks)
     def det_encrypt_text_pair():
-        encrypt_with_public_veinn(seed_public, message=message_text, vp=vp, out_file=enc_pub_veinn_text_1, mode="text")
-        encrypt_with_public_veinn(seed_public, message=message_text, vp=vp, out_file=enc_pub_veinn_text_2, mode="text")
+        encrypt_with_public_veinn(seed_public, message=message_text, vp=vp, out_file=enc_pub_veinn_text_1, mode="t")
+        encrypt_with_public_veinn(seed_public, message=message_text, vp=vp, out_file=enc_pub_veinn_text_2, mode="t")
         c1 = read_ciphertext(enc_pub_veinn_text_1)[2]
         c2 = read_ciphertext(enc_pub_veinn_text_2)[2]
         # compare blocks element-wise
@@ -234,8 +234,8 @@ def main():
     )))
 
     def det_encrypt_num_pair():
-        encrypt_with_public_veinn(seed_public, numbers=numbers2, vp=vp, out_file=enc_pub_veinn_num_1, mode="numeric", bytes_per_number=16)
-        encrypt_with_public_veinn(seed_public, numbers=numbers2, vp=vp, out_file=enc_pub_veinn_num_2, mode="numeric", bytes_per_number=16)
+        encrypt_with_public_veinn(seed_public, numbers=numbers2, vp=vp, out_file=enc_pub_veinn_num_1, mode="n", bytes_per_number=16)
+        encrypt_with_public_veinn(seed_public, numbers=numbers2, vp=vp, out_file=enc_pub_veinn_num_2, mode="n", bytes_per_number=16)
         c1 = read_ciphertext(enc_pub_veinn_num_1)[2]
         c2 = read_ciphertext(enc_pub_veinn_num_2)[2]
         if len(c1) != len(c2): return False
