@@ -191,3 +191,9 @@ MIT License. See [LICENSE](LICENSE) for details.
    - veinn-lwe.py (Lattice based INN) <-- Currently my ideal approach, but unstable
    - veinn-rsa.py (RSA, OAEP, HMAC, PBKDF2)
    - veinn.py (Stable)
+
+- Updates
+   - Reorg experimental files to appropriate folder
+   - Breakout modules into appropriate files (need to fix circular ref bug)
+   - Added test.py with 12/13 passing tests reflecting stable encrypt/decrypt workflows
+   - Updated veinn.py to leverage vectorspace for encrypting

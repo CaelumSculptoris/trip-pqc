@@ -229,7 +229,7 @@ def block_to_bytes(x: np.ndarray) -> bytes:
 # ---------------------------------------------------------
 
 def demo():
-    vp = VeinnParams(n=256, rounds=6, layers_per_round=2, shuffle_stride=7)
+    vp = VeinnParams(n=1026, rounds=6, layers_per_round=20, shuffle_stride=7)
     seed = b"example-VEINN-seed-32bytes........"[:32]
     key = key_from_seed(seed, vp)
 
