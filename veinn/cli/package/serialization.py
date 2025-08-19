@@ -1,7 +1,7 @@
 # veinn/serialization.py
 import json
 import numpy as np
-from params import DTYPE
+from .params import DTYPE
 
 def bytes_to_block(b: bytes, n: int) -> np.ndarray:
     padded = b + b"\x00" * ((2 * n - len(b)) % (2 * n))

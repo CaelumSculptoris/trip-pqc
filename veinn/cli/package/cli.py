@@ -4,14 +4,14 @@ import sys
 import json
 import argparse
 from base64 import b64decode
-from params import VeinnParams
-from keystore import create_keystore, store_key_in_keystore, retrieve_key_from_keystore
-from rsa_oaep import generate_rsa_keypair
-from public_api import (
+from .params import VeinnParams
+from .keystore import create_keystore, store_key_in_keystore, retrieve_key_from_keystore
+from .rsa_oaep import generate_rsa_keypair
+from .public_api import (
     encrypt_with_pub, decrypt_with_priv,
     veinn_from_seed, encrypt_with_public_veinn, decrypt_with_public_veinn,
 )
-from homomorphic import homomorphic_add_files, homomorphic_mul_files
+from .homomorphic import homomorphic_add_files, homomorphic_mul_files
 
 def main():
     parser = argparse.ArgumentParser(description="VEINN CLI with Lattice-based INN")
@@ -42,7 +42,7 @@ def main():
     public_encrypt_parser = subparsers.add_parser("public_encrypt", help="Encrypt with public key (RSA + VEINN)")
     public_encrypt_parser.add_argument("--pubfile", default="rsa_pub.json")
     public_encrypt_parser.add_argument("--in_path")
-    public_encrypt_parser.add_argument("--mode", choices=["text", "numeric"], default="text")
+    public_encrypt_parser.add_argument("--mode", choices=["t", "n"], default="t")
     public_encrypt_parser.add_argument("--n", type=int, default=8)
     public_encrypt_parser.add_argument("--rounds", type=int, default=3)
     public_encrypt_parser.add_argument("--layers_per_round", type=int, default=2)
@@ -169,8 +169,8 @@ def main():
                             print("Public key not found. Generate RSA keys first.")
                             continue
                         inpath = input("Optional input file path (blank = prompt): ").strip() or None
-                        mode = (input("Mode: (t)ext or (n)umeric? [t]: ").strip().lower() or "text")
-                        mode = "text" if mode == "t" else "numeric"
+                        mode = (input("Mode: (t)ext or (n)umeric? [t]: ").strip().lower() or "t")
+                        mode = "t" if mode == "t" else "n"
                         n = int(input("Number of uint16 words per block (default 8): ").strip() or 8)
                         rounds = int(input("Number of rounds (default 3): ").strip() or 3)
                         layers_per_round = int(input("Layers per round (default 2): ").strip() or 2)
@@ -182,7 +182,7 @@ def main():
                         vp = VeinnParams(n=n, rounds=rounds, layers_per_round=layers_per_round, shuffle_stride=shuffle_stride, use_lwe=use_lwe)
                         message, numbers = None, None
                         if inpath is None:
-                            if mode == "text":
+                            if mode == "t":
                                 message = input("Message to encrypt: ")
                             else:
                                 content = input("Enter numbers (comma/space separated): ").strip()
@@ -190,7 +190,7 @@ def main():
                                 numbers = [int(x) for x in raw]
                         encrypt_with_pub(pubfile, message=message, numbers=numbers, in_path=inpath, mode=mode, vp=vp, seed_len=seed_len, nonce=nonce)
                     elif choice == "4":
-                        use_keystore = input("Use keystore for private key? (y/n): ").strip().lower() == "y"
+                        use_keystore = input("Use keystore for private key? (y/n): ").strip().lower() == "y" or "y"
                         privfile, keystore, passphrase, key_name = None, None, None, None
                         if use_keystore:
                             keystore = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
@@ -226,9 +226,9 @@ def main():
                     elif choice == "8":
                         seed_input = input("Enter public seed string: ").strip()
                         mode = (input("Mode: (t)ext or (n)umeric? [t]: ").strip().lower() or "t")
-                        mode = "text" if mode == "t" else "numeric"
+                        mode = "t" if mode == "t" else "n"
                         message, numbers, bpn = None, None, None
-                        if mode == "text":
+                        if mode == "t":
                             message = input("Message to encrypt: ")
                         else:
                             content = input("Enter numbers (comma/space separated): ").strip()

@@ -1,7 +1,7 @@
 # veinn/homomorphic.py
-from params import Q
-from serialization import read_ciphertext
-from ring import negacyclic_convolution
+from .params import Q
+from .serialization import read_ciphertext
+from .ring import negacyclic_convolution
 import json
 
 def _load_encrypted_file(enc_file: str):
@@ -12,7 +12,7 @@ def _load_encrypted_file(enc_file: str):
         "layers_per_round": int(metadata["layers_per_round"]),
         "shuffle_stride": int(metadata["shuffle_stride"]),
         "use_lwe": metadata["use_lwe"],
-        "mode": metadata.get("mode", "numeric"),
+        "mode": metadata.get("mode", "n"),
         "bytes_per_number": int(metadata.get("bytes_per_number", metadata.get("n", 4) * 2)),
     }
     return enc_blocks, meta_parsed, hmac_value, nonce, timestamp
@@ -25,7 +25,7 @@ def _write_encrypted_payload(out_file: str, enc_blocks, meta, hmac_value: str = 
             "layers_per_round": int(meta["layers_per_round"]),
             "shuffle_stride": int(meta["shuffle_stride"]),
             "use_lwe": meta["use_lwe"],
-            "mode": meta.get("mode", "numeric"),
+            "mode": meta.get("mode", "n"),
             "bytes_per_number": int(meta.get("bytes_per_number", meta["n"] * 2)),
         },
         "enc_seed": [],

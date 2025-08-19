@@ -1,8 +1,8 @@
 # veinn/coupling.py
 import numpy as np
 from dataclasses import dataclass
-from params import Q, DTYPE
-from ring import negacyclic_convolution
+from .params import Q, DTYPE
+from .ring import negacyclic_convolution
 
 @dataclass
 class CouplingParams:

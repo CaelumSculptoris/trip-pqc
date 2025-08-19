@@ -1,7 +1,7 @@
 # veinn/shuffle.py
 import math
 import numpy as np
-from params import DTYPE
+from .params import DTYPE
 
 def make_shuffle_indices(n: int, stride: int) -> np.ndarray:
     if math.gcd(stride, n) != 1:

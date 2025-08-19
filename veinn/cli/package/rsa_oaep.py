@@ -2,7 +2,7 @@
 import math
 import secrets
 import time
-from .utils import shake
+from .utils import shake, int_to_bytes_be_fixed
 
 def is_probable_prime(n: int, trials: int = 5) -> bool:
     if n < 2:
@@ -67,24 +67,24 @@ def _i2osp_fixed_len(x: int, length: int) -> bytes:
 def oaep_encode(message: bytes, n: int, seed: bytes) -> int:
     k = (n.bit_length() + 7) // 8
     mlen = len(message)
-    hlen = 32
-    if mlen > k - 2 * hlen - 2:
+    if mlen > k - 2 * 32 - 2:
         raise ValueError("Message too long for OAEP")
+    hlen = 32
+    pad_len = k - mlen - 2 * hlen - 2
     lhash = shake(hlen, b"")
-    ps = b"\x00" * (k - mlen - 2 * hlen - 2)
-    db = lhash + ps + b"\x01" + message
+    ps = b'\x00' * pad_len
+    db = lhash + ps + b'\x01' + message
     seed = shake(hlen, seed)
     db_mask = shake(k - hlen - 1, seed)
     masked_db = bytes(a ^ b for a, b in zip(db, db_mask))
     seed_mask = shake(hlen, masked_db)
     masked_seed = bytes(a ^ b for a, b in zip(seed, seed_mask))
-    em = b"\x00" + masked_seed + masked_db
-    return int.from_bytes(em, "big")
+    return int.from_bytes(b'\x00' + masked_seed + masked_db, 'big')
 
-def oaep_decode(cipher_int: int, n: int, seed_hint: bytes) -> bytes:
-    """Decode OAEP. Uses fixed-length I2OSP to avoid 'invalid ciphertext length' issues."""
+def oaep_decode(cipher_int: int, n: int) -> bytes:
+    """Decode OAEP given integer ciphertext and modulus. Handles left-padding to k bytes."""
     k = (n.bit_length() + 7) // 8
-    c = _i2osp_fixed_len(cipher_int, k)
+    c = int_to_bytes_be_fixed(cipher_int, k)
     if c[0] != 0:
         raise ValueError("Invalid OAEP format")
     hlen = 32
