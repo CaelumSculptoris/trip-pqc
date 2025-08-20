@@ -73,12 +73,12 @@ def pkcs7_pad(data: bytes, block_size: int) -> bytes:
 
 def pkcs7_unpad(data: bytes) -> bytes:
     if not data:
-        raise ValueError("Cannot unpad empty data")
+        raise ValueError(f"{bcolors.FAIL}Cannot unpad empty data{bcolors.ENDC}")
     padding_len = data[-1]
     if padding_len == 0 or padding_len > len(data):
-        raise ValueError("Invalid padding")
+        raise ValueError(f"{bcolors.FAIL}Invalid padding{bcolors.ENDC}")
     if not all(b == padding_len for b in data[-padding_len:]):
-        raise ValueError("Invalid padding")
+        raise ValueError(f"{bcolors.FAIL}Invalid padding{bcolors.ENDC}")
     return data[:-padding_len]
 
 # -----------------------------
@@ -159,7 +159,7 @@ def coupling_inverse(x: np.ndarray, cp: CouplingParams) -> np.ndarray:
 # -----------------------------
 def make_shuffle_indices(n: int, stride: int) -> np.ndarray:
     if math.gcd(stride, n) != 1:
-        raise ValueError("shuffle_stride must be coprime with n")
+        raise ValueError(f"{bcolors.FAIL}shuffle_stride must be coprime with n{bcolors.ENDC}")
     return np.array([(i * stride) % n for i in range(n)], dtype=np.int32)
 
 def shuffle(x: np.ndarray, idx: np.ndarray) -> np.ndarray:
@@ -193,14 +193,14 @@ def modinv(a: int, m: int) -> int:
         return g, y1 - (bb // aa) * x1, x1
     g, x, _ = egcd(a, m)
     if g != 1:
-        raise ValueError("Modular inverse does not exist")
+        raise ValueError(f"{bcolors.FAIL}Modular inverse does not exist{bcolors.ENDC}")
     return x % m
 
 def inv_vec_mod_q(arr: np.ndarray) -> np.ndarray:
     out = np.zeros_like(arr, dtype=np.uint16)
     for i, v in enumerate(arr.astype(int).tolist()):
         if v % 2 == 0:
-            raise ValueError("Non-odd element encountered; not invertible modulo 2^16")
+            raise ValueError(f"{bcolors.FAIL}Non-odd element encountered; not invertible modulo 2^16{bcolors.ENDC}")
         out[i] = modinv(v, Q)
     return out
 
@@ -328,9 +328,9 @@ def homomorphic_add_files(f1: str, f2: str, out_file: str):
     enc1, meta1, _, _, _ = _load_encrypted_file(f1)
     enc2, meta2, _, _, _ = _load_encrypted_file(f2)
     if meta1 != meta2:
-        raise ValueError("Encrypted files metadata mismatch")
+        raise ValueError(f"{bcolors.FAIL}Encrypted files metadata mismatch{bcolors.ENDC}")
     if len(enc1) != len(enc2):
-        raise ValueError("Encrypted files must have same number of blocks")
+        raise ValueError(f"{bcolors.FAIL}Encrypted files must have same number of blocks{bcolors.ENDC}")
     summed = [(a + b) % Q for a, b in zip(enc1, enc2)]
     _write_encrypted_payload(out_file, summed, meta1)
     print(f"Lattice-based homomorphic sum saved to {out_file}")
@@ -339,9 +339,9 @@ def homomorphic_mul_files(f1: str, f2: str, out_file: str):
     enc1, meta1, _, _, _ = _load_encrypted_file(f1)
     enc2, meta2, _, _, _ = _load_encrypted_file(f2)
     if meta1 != meta2:
-        raise ValueError("Encrypted files metadata mismatch")
+        raise ValueError(f"{bcolors.FAIL}Encrypted files metadata mismatch{bcolors.ENDC}")
     if len(enc1) != len(enc2):
-        raise ValueError("Encrypted files must have same number of blocks")
+        raise ValueError(f"{bcolors.FAIL}Encrypted files must have same number of blocks{bcolors.ENDC}")
     prod = [negacyclic_convolution(a, b, Q) for a, b in zip(enc1, enc2)]
     _write_encrypted_payload(out_file, prod, meta1)
     print(f"Lattice-based homomorphic product saved to {out_file}")
@@ -387,13 +387,13 @@ def store_key_in_keystore(passphrase: str, key_name: str, key_data: dict, keysto
 def retrieve_key_from_keystore(passphrase: str, key_name: str, keystore_file: str) -> dict:
     keystore, fernet = load_keystore(passphrase, keystore_file)
     if key_name not in keystore["keys"]:
-        raise ValueError(f"Key {key_name} not found in keystore")
+        raise ValueError(f"{bcolors.FAIL}Key {key_name} not found in keystore{bcolors.ENDC}")
     encrypted_key = keystore["keys"][key_name]
     try:
         decrypted_key = fernet.decrypt(encrypted_key.encode())
         return json.loads(decrypted_key.decode())
     except Exception:
-        raise ValueError("Failed to decrypt key. Wrong passphrase?")
+        raise ValueError(f"{bcolors.FAIL}Failed to decrypt key. Wrong passphrase?{bcolors.ENDC}")
 
 # -----------------------------
 # RSA Helpers
@@ -440,7 +440,7 @@ def egcd(a: int, b: int) -> tuple:
 def modinv_int(a: int, m: int) -> int:
     gcd, x, _ = egcd(a, m)
     if gcd != 1:
-        raise ValueError("Modular inverse does not exist")
+        raise ValueError(f"{bcolors.FAIL}Modular inverse does not exist{bcolors.ENDC}")
     return x % m
 
 def generate_rsa_keypair(bits: int) -> dict:
@@ -463,7 +463,7 @@ def int_to_bytes_be_fixed(n: int, k: int) -> bytes:
     """Big-endian, left-padded with zeros to exactly k bytes."""
     b = int_to_bytes_be(n)
     if len(b) > k:
-        raise ValueError("Integer too large for target length")
+        raise ValueError(f"{bcolors.FAIL}Integer too large for target length{bcolors.ENDC}")
     return b.rjust(k, b'\x00')
 
 def bytes_be_to_int(b: bytes) -> int:
@@ -479,7 +479,7 @@ def oaep_encode(message: bytes, n: int, seed: bytes) -> int:
     k = (n.bit_length() + 7) // 8
     mlen = len(message)
     if mlen > k - 2 * 32 - 2:
-        raise ValueError("Message too long for OAEP")
+        raise ValueError(f"{bcolors.FAIL}Message too long for OAEP{bcolors.ENDC}")
     hlen = 32
     pad_len = k - mlen - 2 * hlen - 2
     lhash = shake(hlen, b"")
@@ -497,7 +497,7 @@ def oaep_decode(cipher_int: int, n: int) -> bytes:
     k = (n.bit_length() + 7) // 8
     c = int_to_bytes_be_fixed(cipher_int, k)
     if c[0] != 0:
-        raise ValueError("Invalid OAEP format")
+        raise ValueError(f"{bcolors.FAIL}Invalid OAEP format{bcolors.ENDC}")
     hlen = 32
     masked_seed = c[1:1 + hlen]
     masked_db = c[1 + hlen:]
@@ -507,12 +507,12 @@ def oaep_decode(cipher_int: int, n: int) -> bytes:
     db = bytes(a ^ b for a, b in zip(masked_db, db_mask))
     lhash = shake(hlen, b"")
     if db[:hlen] != lhash:
-        raise ValueError("Invalid OAEP lhash")
+        raise ValueError(f"{bcolors.FAIL}Invalid OAEP lhash{bcolors.ENDC}")
     i = hlen
     while i < len(db) and db[i] == 0:
         i += 1
     if i >= len(db) or db[i] != 1:
-        raise ValueError("Invalid OAEP padding")
+        raise ValueError(f"{bcolors.FAIL}Invalid OAEP padding{bcolors.ENDC}")
     return db[i + 1:]
 
 def validate_timestamp(timestamp: float, validity_window: int) -> bool:
@@ -534,11 +534,11 @@ def encrypt_with_pub(pubfile: str, message: Optional[str] = None, numbers: Optio
             message_bytes = f.read()
     elif mode == "t":
         if not message:
-            raise ValueError("Message required for text mode")
+            raise ValueError(f"{bcolors.FAIL}Message required for text mode{bcolors.ENDC}")
         message_bytes = message.encode('utf-8')
     else:
         if not numbers:
-            raise ValueError("Numbers required for numeric mode")
+            raise ValueError(f"{bcolors.FAIL}Numbers required for numeric mode{bcolors.ENDC}")
         bytes_per_number = vp.n * 2
         message_bytes = b""
         for num in numbers:
@@ -580,7 +580,7 @@ def decrypt_with_priv(keystore: Optional[str], privfile: Optional[str], encfile:
     d = privkey["d"]
     metadata, enc_seed_bytes, enc_blocks, hmac_value, nonce, timestamp = read_ciphertext(encfile)
     if not validate_timestamp(timestamp, validity_window):
-        raise ValueError("Timestamp outside validity window")
+        raise ValueError(f"{bcolors.FAIL}Timestamp outside validity window{bcolors.ENDC}")
     # RSA decrypt OAEP
     enc_seed_int = bytes_be_to_int(enc_seed_bytes)
     seed_int = pow(enc_seed_int, d, n)
@@ -588,7 +588,7 @@ def decrypt_with_priv(keystore: Optional[str], privfile: Optional[str], encfile:
     # Verify HMAC
     msg_for_hmac = enc_seed_bytes + b"".join(block_to_bytes(b) for b in enc_blocks) + math.floor(timestamp).to_bytes(8, 'big')
     if not hmac.compare_digest(hmac.new(ephemeral_seed, msg_for_hmac, hashlib.sha256).hexdigest(), hmac_value):
-        raise ValueError("HMAC verification failed")
+        raise ValueError(f"{bcolors.FAIL}HMAC verification failed{bcolors.ENDC}")
     # Decrypt blocks
     vp = VeinnParams(
         n=metadata["n"],
@@ -615,11 +615,11 @@ def encrypt_with_public_veinn(seed_input: str, message: Optional[str] = None, nu
     k = key_from_seed(seed, vp)
     if message or mode == "t":
         if not message:
-            raise ValueError("Message required for text mode")
+            raise ValueError(f"{bcolors.FAIL}Message required for text mode{bcolors.ENDC}")
         message_bytes = message.encode('utf-8')
     else:
         if not numbers:
-            raise ValueError("Numbers required for numeric mode")
+            raise ValueError(f"{bcolors.FAIL}Numbers required for numeric mode{bcolors.ENDC}")
         if not bytes_per_number:
             bytes_per_number = vp.n * 2
         message_bytes = b""
@@ -651,10 +651,10 @@ def decrypt_with_public_veinn(seed_input: str, enc_file: str, validity_window: i
     seed = seed_input.encode('utf-8')
     metadata, _, enc_blocks, hmac_value, nonce, timestamp = read_ciphertext(enc_file)
     if not validate_timestamp(timestamp, validity_window):
-        raise ValueError("Timestamp outside validity window")
+        raise ValueError(f"{bcolors.FAIL}Timestamp outside validity window{bcolors.ENDC}")
     msg_for_hmac = b"".join(block_to_bytes(b) for b in enc_blocks) + math.floor(timestamp).to_bytes(8, 'big')
     if not hmac.compare_digest(hmac.new(seed, msg_for_hmac, hashlib.sha256).hexdigest(), hmac_value):
-        raise ValueError("HMAC verification failed")
+        raise ValueError(f"{bcolors.FAIL}HMAC verification failed{bcolors.ENDC}")
     vp = VeinnParams(
         n=metadata["n"],
         rounds=metadata["rounds"],
@@ -1023,11 +1023,11 @@ def main():
                     case _:
                         print("Invalid choice")
             except Exception as e:
-                print("ERROR:", e)
+                print(f"{bcolors.FAIL}ERROR:{bcolors.ENDC}", e)
             time.sleep(3)
             _=os.system("cls") | os.system("clear")
     except Exception as e:
-        print("ERROR:", e)
+        print(f"{bcolors.FAIL}ERROR:{bcolors.ENDC}", e)
         sys.exit(1)
 if __name__ == "__main__":
     main()
