@@ -15,6 +15,20 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from base64 import b64encode, b64decode
 from dataclasses import dataclass
+# -----------------------------
+# CLI Colors
+# -----------------------------
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    GREY = '\033[90m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
 
 # -----------------------------
 # Core Parameters
@@ -966,22 +980,23 @@ def main():
                     use_lwe=args.use_lwe
                 )
                 veinn_from_seed(args.seed, vp)
-        
-        print("VEINN CLI — Lattice-based INN with LWE-based Key Nonlinearity")
-        print("Nonlinearity via LWE PRF; linear INN for invertibility and homomorphism.")
+        _=os.system("cls") | os.system("clear")        
         while True:
+            print(f"{bcolors.OKCYAN}VEINN CLI — Lattice-based INN with LWE-based Key Nonlinearity{bcolors.ENDC}")
+            print(f"{bcolors.OKCYAN}Nonlinearity via LWE PRF; linear INN for invertibility and homomorphism.{bcolors.ENDC}")
             print("")
-            print("1) Create encrypted keystore")
-            print("2) Generate RSA keypair (public/private)")
-            print("3) Encrypt with recipient public key (RSA + VEINN)")
-            print("4) Decrypt with private key")
-            print("5) Lattice-based homomorphic add (file1, file2 -> out)")
-            print("6) Lattice-based homomorphic multiply (file1, file2 -> out)")
-            print("7) Derive public VEINN from seed")
-            print("8) Encrypt deterministically using public VEINN")
-            print("9) Decrypt deterministically using public VEINN")
-            print("0) Exit")
-            choice = input("Choice: ").strip()
+            print(f"{bcolors.BOLD}1){bcolors.ENDC} Create encrypted keystore")
+            print(f"{bcolors.BOLD}2){bcolors.ENDC} Generate RSA keypair (public/private)")
+            print(f"{bcolors.BOLD}3){bcolors.ENDC} Encrypt with recipient public key (RSA + VEINN)")
+            print(f"{bcolors.BOLD}4){bcolors.ENDC} Decrypt with private key")
+            print(f"{bcolors.BOLD}5){bcolors.ENDC} Encrypt deterministically using public VEINN")
+            print(f"{bcolors.BOLD}6){bcolors.ENDC} Decrypt deterministically using public VEINN")
+            print(f"{bcolors.GREY}7) Lattice-based homomorphic add (file1, file2 -> out){bcolors.ENDC}")
+            print(f"{bcolors.GREY}8) Lattice-based homomorphic multiply (file1, file2 -> out){bcolors.ENDC}")
+            print(f"{bcolors.GREY}9) Derive public VEINN from seed{bcolors.ENDC}")
+
+            print(f"{bcolors.BOLD}0){bcolors.ENDC} Exit")
+            choice = input(f"{bcolors.BOLD}Choice: {bcolors.ENDC}").strip()
 
             try:
                 match choice:
@@ -996,22 +1011,23 @@ def main():
                     case "4":
                         menu_decrypt_with_priv()
                     case "5":
-                        menu_homomorphic_add_files()
+                        menu_encrypt_with_public_veinn()
                     case "6":
-                        menu_homomorphic_mul_files()
+                        menu_decrypt_with_public_veinn()
                     case "7":
                         menu_veinn_from_seed()
                     case "8":
-                        menu_encrypt_with_public_veinn()
+                        menu_homomorphic_add_files()
                     case "9":
-                        menu_decrypt_with_public_veinn()
+                        menu_homomorphic_mul_files()
                     case _:
                         print("Invalid choice")
             except Exception as e:
                 print("ERROR:", e)
+            time.sleep(3)
+            _=os.system("cls") | os.system("clear")
     except Exception as e:
         print("ERROR:", e)
         sys.exit(1)
-
 if __name__ == "__main__":
     main()

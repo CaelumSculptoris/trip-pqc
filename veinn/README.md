@@ -50,7 +50,7 @@ Key components in `veinn.py`:
 
 Clone the repo:
 ```bash
-git clone https://github.com/yourusername/veinn.git
+git clone https://github.com/CaelumSculptoris/veinn.git
 cd veinn
 ```
 
