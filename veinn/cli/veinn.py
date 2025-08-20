@@ -836,7 +836,6 @@ def main():
                         passphrase = input("Enter keystore passphrase: ")
                         keystore_file = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
                         create_keystore(passphrase, keystore_file)
-                        print(f"Keystore created: {keystore_file}")
                     elif choice == "2":
                         bits = int(input("RSA key size in bits (default 2048): ").strip() or 2048)
                         pubfile = input("Public key filename (default rsa_pub.json): ").strip() or "rsa_pub.json"
@@ -886,9 +885,9 @@ def main():
                                 numbers = [int(x) for x in raw_nums]
                         encrypt_with_pub(pubfile, message=message, numbers=numbers, in_path=inpath, mode=mode, vp=vp, seed_len=seed_len, nonce=nonce)
                     elif choice == "4":
-                        use_keystore = input("Use keystore for private key? (y/n): ").strip().lower() == "y"
+                        use_keystore = input("Use keystore for private key? (y/n): ").strip().lower() or "y"
                         privfile, keystore, passphrase, key_name = None, None, None, None
-                        if use_keystore:
+                        if use_keystore == "y":
                             keystore = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
                             passphrase = input("Keystore passphrase: ")
                             key_name = input("Key name in keystore: ")
@@ -930,12 +929,13 @@ def main():
                         vp = VeinnParams(n=n, rounds=rounds, layers_per_round=layers_per_round, shuffle_stride=shuffle_stride, use_lwe=use_lwe)
                         veinn_from_seed(seed_input, vp)
                     elif choice == "8":
-                        use_keystore = input("Use keystore for seed? (y/n): ").strip().lower() == "y"
+                        use_keystore = input("Use keystore for seed? (y/n): ").strip().lower() or "y"
                         seed_input, keystore, passphrase, key_name = None, None, None, None
-                        if use_keystore:
+                        if use_keystore == "y":
                             keystore = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
                             passphrase = input("Keystore passphrase: ")
-                            key_name = input("Seed name in keystore: ")
+                            key_name = input("Seed name in keystore: ")                            
+                            store_key_in_keystore(passphrase, key_name, {"seed": key_name}, keystore)
                             seed_data = retrieve_key_from_keystore(passphrase, key_name, keystore)
                             seed_input = seed_data["seed"]
                         else:
@@ -962,12 +962,11 @@ def main():
                         nonce = b64decode(nonce_str) if nonce_str else None
                         vp = VeinnParams(n=n, rounds=rounds, layers_per_round=layers_per_round, shuffle_stride=shuffle_stride, use_lwe=use_lwe)
                         out_file = encrypt_with_public_veinn(seed_input, message, numbers, vp, out_file, mode, bytes_per_number, nonce)
-                        if use_keystore:
-                            store_key_in_keystore(passphrase, key_name, {"seed": seed_input}, keystore)
+                        
                     elif choice == "9":
-                        use_keystore = input("Use keystore for seed? (y/n): ").strip().lower() == "y"
+                        use_keystore = input("Use keystore for seed? (y/n): ").strip().lower() or "y"
                         seed_input, keystore, passphrase, key_name = None, None, None, None
-                        if use_keystore:
+                        if use_keystore == "y":
                             keystore = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
                             passphrase = input("Keystore passphrase: ")
                             key_name = input("Seed name in keystore: ")
