@@ -196,15 +196,11 @@ It is not yet standardized, audited, or production-ready. Use at your own risk.
 MIT License
 
 ## Notes
-- In Progress
-   - veinn-ckks.py (Leveraging CKKS homomorphism)
-   - veinn-hmac.py (non-linear INN + ChaCha20-Poly1305 + HMAC)
-   - veinn-lwe.py (Lattice based INN) <-- Currently my ideal approach, but unstable
-   - veinn-rsa.py (RSA, OAEP, HMAC, PBKDF2)
-   - veinn.py (Stable)
 
 - Updates
    - Reorg experimental files to appropriate folder
    - Breakout modules into appropriate files (need to fix circular ref bug)
    - Added test.py with 12/13 passing tests reflecting stable encrypt/decrypt workflows
    - Updated veinn.py to leverage vectorspace for encrypting
+   - Clean up and color CLI package and full file.
+   - Remove experimental
