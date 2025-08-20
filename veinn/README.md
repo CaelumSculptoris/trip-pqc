@@ -63,6 +63,16 @@ pip install -r requirements.txt
 
 ### Usage via CLI
 
+#### Menu access
+```bash
+python3 cli/veinn.py 
+```
+
+#### package access
+```bash
+python3 -m cli/package.cli
+```
+
 #### Encrypt a file
 ```bash
 python veinn.py encrypt --infile plaintext.txt --outfile ciphertext.json --seed mysecretseed
