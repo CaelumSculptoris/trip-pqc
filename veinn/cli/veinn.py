@@ -84,6 +84,18 @@ def pkcs7_unpad(data: bytes) -> bytes:
 # -----------------------------
 # LWE-Based PRF
 # -----------------------------
+def int_ring_convolve(a, b, q, root):
+    """Convolution over Z_q[x]/(x^n+1) using NTT"""
+    n = len(a)
+    A = ntt(a, q, root)
+    B = ntt(b, q, root)
+    C = (A * B) % q
+    # Inverse NTT: use modular inverse of n and root
+    inv_n = pow(n, -1, q)
+    inv_root = pow(root, -1, q)
+    c = ntt(C, q, inv_root)
+    return (c * inv_n) % q
+
 def ring_convolution(a, b, q, method="naive"):
     """
     Ring convolution modulo q, drop-in replacement for your current method.
