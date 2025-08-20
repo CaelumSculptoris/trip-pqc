@@ -84,6 +84,117 @@ def pkcs7_unpad(data: bytes) -> bytes:
 # -----------------------------
 # LWE-Based PRF
 # -----------------------------
+def ring_convolution(a, b, q, method="naive"):
+    """
+    Ring convolution modulo q, drop-in replacement for your current method.
+
+    Args:
+        a, b : list[int] or np.ndarray
+            Polynomials represented as coefficient lists of length n
+        q : int
+            Modulus
+        method : str
+            "naive" → O(n^2), slow but exact
+            "fft"   → O(n log n), floating point FFT (fast, but rounding)
+            "ntt"   → O(n log n), modular NTT (exact if q supports)
+
+    Returns:
+        np.ndarray : coefficients of (a * b) mod (x^n+1, q)
+    """
+    n = len(a)
+    a = np.array(a, dtype=int) % q
+    b = np.array(b, dtype=int) % q
+
+    if method == "naive":
+        # direct polynomial multiplication
+        res = np.zeros(2*n, dtype=int)
+        for i in range(n):
+            for j in range(n):
+                res[i+j] += a[i] * b[j]
+        # wrap back into ring (mod x^n + 1)
+        res = (res[:n] - res[n:]) % q
+        return res
+
+    elif method == "fft":
+        # floating point FFT
+        A = np.fft.fft(a, 2*n)
+        B = np.fft.fft(b, 2*n)
+        C = A * B
+        res = np.fft.ifft(C).real.round().astype(int)
+        res = (res[:n] - res[n:]) % q
+        return res
+
+    elif method == "ntt":
+        # NTT requires q ≡ 1 mod 2n (so a primitive root exists)
+        # toy implementation: only works if q is carefully chosen
+        # Here we fallback to naive if q is unsuitable
+        if (q - 1) % (2*n) != 0:
+            return ring_convolution(a, b, q, method="naive")
+
+        # find primitive 2n-th root of unity modulo q
+        g = find_primitive_root(q)
+        root = pow(g, (q - 1) // (2*n), q)
+
+        A = ntt(a, root, q)
+        B = ntt(b, root, q)
+        C = [(x*y) % q for x, y in zip(A, B)]
+        res = intt(C, root, q)
+        res = (np.array(res[:n]) - np.array(res[n:])) % q
+        return res
+
+    else:
+        raise ValueError("method must be one of: naive, fft, ntt")
+
+# -----------------------------
+# Helper functions for NTT 
+# -----------------------------
+def ntt(a, root, q):
+    n = len(a)
+    A = [0]*n
+    for k in range(n):
+        s = 0
+        for j in range(n):
+            s = (s + a[j] * pow(root, (j*k) % (2*n), q)) % q
+        A[k] = s
+    return A
+
+def intt(A, root, q):
+    n = len(A)
+    inv_n = pow(n, -1, q)
+    root_inv = pow(root, -1, q)
+    a = [0]*n
+    for j in range(n):
+        s = 0
+        for k in range(n):
+            s = (s + A[k] * pow(root_inv, (j*k) % (2*n), q)) % q
+        a[j] = (s * inv_n) % q
+    return a
+
+def find_primitive_root(q):
+    """Finds a primitive root modulo q (very naive)."""
+    factors = factorize(q-1)
+    for g in range(2, q):
+        ok = True
+        for f in factors:
+            if pow(g, (q-1)//f, q) == 1:
+                ok = False
+                break
+        if ok:
+            return g
+    return None
+
+def factorize(n):
+    factors = set()
+    d = 2
+    while d*d <= n:
+        while n % d == 0:
+            factors.add(d)
+            n //= d
+        d += 1
+    if n > 1:
+        factors.add(n)
+    return list(factors)
+
 def negacyclic_convolution(a: np.ndarray, b: np.ndarray, q: int) -> np.ndarray:
     """O(n^2) negacyclic convolution in Z_q[x]/(x^n+1)."""
     assert a.shape == b.shape, f"Convolution shape mismatch: a {a.shape}, b {b.shape}"
@@ -108,7 +219,7 @@ def lwe_prf_expand(seed: bytes, out_n: int, vp: VeinnParams) -> np.ndarray:
     raw = shake(n, seed, b"e")
     e = (np.frombuffer(raw, dtype=np.uint8)[:n] % 3).astype(np.int64)  # Small noise
     assert s.shape == (n,) and a.shape == (n,) and e.shape == (n,), "LWE parameter shape mismatch"
-    b = negacyclic_convolution(a, s, Q).astype(np.int64)
+    b = ring_convolution(a, s, Q, 'ntt').astype(np.int64)
     b = (b + e) % Q
     out = np.zeros(out_n, dtype=DTYPE)
     for i in range(out_n):
@@ -132,10 +243,10 @@ def coupling_forward(x: np.ndarray, cp: CouplingParams) -> np.ndarray:
     x1 = x[:h].copy()
     x2 = x[h:].copy()
     t = (x2.astype(np.int64) + cp.mask_a.astype(np.int64)) % Q
-    t = negacyclic_convolution(t, np.ones(h, dtype=DTYPE), Q)
+    t = ring_convolution(t, np.ones(h, dtype=DTYPE), Q, 'ntt')
     x1 = (x1.astype(np.int64) + t) % Q
     u = (x1.astype(np.int64) + cp.mask_b.astype(np.int64)) % Q
-    u = negacyclic_convolution(u, np.ones(h, dtype=DTYPE), Q)
+    u = ring_convolution(u, np.ones(h, dtype=DTYPE), Q, 'ntt')
     x2 = (x2.astype(np.int64) + u) % Q
     return np.concatenate([x1.astype(DTYPE), x2.astype(DTYPE)])
 
@@ -147,10 +258,10 @@ def coupling_inverse(x: np.ndarray, cp: CouplingParams) -> np.ndarray:
     x1 = x[:h].copy()
     x2 = x[h:].copy()
     u = (x1.astype(np.int64) + cp.mask_b.astype(np.int64)) % Q
-    u = negacyclic_convolution(u, np.ones(h, dtype=DTYPE), Q)
+    u = ring_convolution(u, np.ones(h, dtype=DTYPE), Q, 'ntt')
     x2 = (x2.astype(np.int64) - u) % Q
     t = (x2.astype(np.int64) + cp.mask_a.astype(np.int64)) % Q
-    t = negacyclic_convolution(t, np.ones(h, dtype=DTYPE), Q)
+    t = ring_convolution(t, np.ones(h, dtype=DTYPE), Q, 'ntt')
     x1 = (x1.astype(np.int64) - t) % Q
     return np.concatenate([x1.astype(DTYPE), x2.astype(DTYPE)])
 
@@ -276,14 +387,18 @@ def permute_inverse(x: np.ndarray, key: VeinnKey) -> np.ndarray:
 # Block Helpers
 # -----------------------------
 def bytes_to_block(b: bytes, n: int) -> np.ndarray:
-    padded = b + b'\x00' * ((2 * n - len(b)) % (2 * n))
-    arr = np.frombuffer(padded, dtype=np.uint16)
-    if arr.shape[0] < n:
-        arr = np.pad(arr, (0, n - arr.shape[0]), mode='constant', constant_values=0)
-    return arr[:n].astype(DTYPE)
+    # padded = b + b'\x00' * ((2 * n - len(b)) % (2 * n))
+    # arr = np.frombuffer(padded, dtype=np.uint16)
+    # if arr.shape[0] < n:
+    #     arr = np.pad(arr, (0, n - arr.shape[0]), mode='constant', constant_values=0)
+    # return arr[:n].astype(DTYPE)
+    padded = b.ljust(2 * n, b'\x00')
+    arr = np.frombuffer(padded, dtype='<u2')[:n].copy()
+    return arr.astype(DTYPE)
 
 def block_to_bytes(x: np.ndarray) -> bytes:
-    return x.tobytes()
+    # return x.tobytes()
+    return x.astype('<u2').tobytes()
 
 # -----------------------------
 # Homomorphic Operations
@@ -342,7 +457,7 @@ def homomorphic_mul_files(f1: str, f2: str, out_file: str):
         raise ValueError(f"{bcolors.FAIL}Encrypted files metadata mismatch{bcolors.ENDC}")
     if len(enc1) != len(enc2):
         raise ValueError(f"{bcolors.FAIL}Encrypted files must have same number of blocks{bcolors.ENDC}")
-    prod = [negacyclic_convolution(a, b, Q) for a, b in zip(enc1, enc2)]
+    prod = [ring_convolution(a, b, Q, 'ntt') for a, b in zip(enc1, enc2)]
     _write_encrypted_payload(out_file, prod, meta1)
     print(f"Lattice-based homomorphic product saved to {out_file}")
 
