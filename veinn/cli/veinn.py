@@ -1151,7 +1151,7 @@ def main():
                         print("Invalid choice")
             except Exception as e:
                 print(f"{bcolors.FAIL}ERROR:{bcolors.ENDC}", e)
-            time.sleep(3)
+            _=input(f"{bcolors.OKGREEN}Any Key to Continue{bcolors.ENDC}")
             _=os.system("cls") | os.system("clear")
     except Exception as e:
         print(f"{bcolors.FAIL}ERROR:{bcolors.ENDC}", e)

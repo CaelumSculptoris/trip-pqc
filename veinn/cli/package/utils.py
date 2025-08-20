@@ -1,8 +1,11 @@
 # veinn/utils.py
 import hashlib
 import numpy as np
-from .params import Q, DTYPE, VeinnParams
+from .params import Q, DTYPE, VeinnParams, bcolors
 from .ring import negacyclic_convolution
+# -----------------------------
+# Utilities
+# -----------------------------
 
 def lwe_prf_expand(seed: bytes, out_n: int, vp) -> np.ndarray:
     """Generate pseudorandom parameters with small-noise LWE flavor."""
@@ -44,26 +47,28 @@ def pkcs7_pad(data: bytes, block_size: int) -> bytes:
 
 def pkcs7_unpad(data: bytes) -> bytes:
     if not data:
-        raise ValueError("Cannot unpad empty data")
+        raise ValueError(f"{bcolors.FAIL}Cannot unpad empty data{bcolors.ENDC}")
     padding_len = data[-1]
     if padding_len == 0 or padding_len > len(data):
-        raise ValueError("Invalid padding")
+        raise ValueError(f"{bcolors.FAIL}Invalid padding{bcolors.ENDC}")
     if not all(b == padding_len for b in data[-padding_len:]):
-        raise ValueError("Invalid padding")
+        raise ValueError(f"{bcolors.FAIL}Invalid padding{bcolors.ENDC}")
     return data[:-padding_len]
 
 def derive_seed_bytes(nonce: bytes, seed_len: int = 32) -> bytes:
     return shake(seed_len, nonce)
 
 def int_to_bytes_be(n: int) -> bytes:
-    return n.to_bytes((n.bit_length() + 7) // 8, "big")
-
-def bytes_be_to_int(b: bytes) -> int:
-    return int.from_bytes(b, "big")
+    if n == 0:
+        return b"\x00"
+    return n.to_bytes((n.bit_length() + 7) // 8, 'big')
 
 def int_to_bytes_be_fixed(n: int, k: int) -> bytes:
     """Big-endian, left-padded with zeros to exactly k bytes."""
     b = int_to_bytes_be(n)
     if len(b) > k:
-        raise ValueError("Integer too large for target length")
+        raise ValueError(f"{bcolors.FAIL}Integer too large for target length{bcolors.ENDC}")
     return b.rjust(k, b'\x00')
+
+def bytes_be_to_int(b: bytes) -> int:
+    return int.from_bytes(b, 'big')

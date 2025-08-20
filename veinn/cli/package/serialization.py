@@ -1,23 +1,26 @@
-# veinn/serialization.py
 import json
 import numpy as np
 from .params import DTYPE
 
+# -----------------------------
+# Block Helpers
+# -----------------------------
 def bytes_to_block(b: bytes, n: int) -> np.ndarray:
-    padded = b + b"\x00" * ((2 * n - len(b)) % (2 * n))
-    arr = np.frombuffer(padded, dtype=np.uint16)
-    if arr.shape[0] < n:
-        arr = np.pad(arr, (0, n - arr.shape[0]), mode="constant", constant_values=0)
-    return arr[:n].astype(DTYPE)
+    padded = b.ljust(2 * n, b'\x00')
+    arr = np.frombuffer(padded, dtype='<u2')[:n].copy()
+    return arr.astype(DTYPE)
 
 def block_to_bytes(x: np.ndarray) -> bytes:
-    return x.tobytes()
+    return x.astype('<u2').tobytes()
 
+# -----------------------------
+# Serialization Helpers
+# -----------------------------
 def write_ciphertext_json(path: str, encrypted_blocks: list, metadata: dict, enc_seed_bytes: bytes, hmac_value: str = None, nonce: bytes = None, timestamp: float = None):
     payload = {
         "veinn_metadata": metadata,
         "enc_seed": [int(b) for b in enc_seed_bytes],
-        "encrypted": [[int(x) for x in blk.tolist()] for blk in encrypted_blocks],
+        "encrypted": [[int(x) for x in blk.tolist()] for blk in encrypted_blocks]
     }
     if hmac_value:
         payload["hmac"] = hmac_value
