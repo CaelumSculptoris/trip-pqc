@@ -324,11 +324,11 @@ def main():
                     case "6":
                         menu_decrypt_with_public_veinn()
                     case "7":
-                        menu_veinn_from_seed()
-                    case "8":
                         menu_homomorphic_add_files()
-                    case "9":
+                    case "8":
                         menu_homomorphic_mul_files()
+                    case "9":                        
+                        menu_veinn_from_seed()
                     case _:
                         print("Invalid choice")
             except Exception as e:
