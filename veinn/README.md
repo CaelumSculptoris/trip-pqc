@@ -198,6 +198,7 @@ It is not yet standardized, audited, or production-ready. Use at your own risk.
 MIT License
 
 ## Notes
+   - 25 YoE in software engineering, frontend frameworks specialist. Zero YoE Python/Cryptography. Please dont judge me too strongly, I know the code looks like garbage. Primarily trying to get a working and stable PoC before I refactor the code and abstract the VEINN primitive out as an importable class. 
 
 ### Updates
    - Reorg experimental files to appropriate folder
