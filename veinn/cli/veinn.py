@@ -33,16 +33,18 @@ class bcolors:
 # -----------------------------
 # Core Parameters
 # -----------------------------
-Q = 2**16  # Modulus
-DTYPE = np.uint16
+Q = 2**32  # Modulus
+DTYPE = np.uint64
 
 @dataclass
 class VeinnParams:
-    n: int = 8  # Number of uint16 words per block (default 8 -> 16 bytes/block)
-    rounds: int = 3
-    layers_per_round: int = 2
-    shuffle_stride: int = 7
+    n: int = 256  # Number of uint16 words per block (default 8 -> 16 bytes/block)
+    rounds: int = 10
+    layers_per_round: int = 10
+    shuffle_stride: int = 11
     use_lwe: bool = True  # LWE PRF for key nonlinearity and PQ security
+    valid: int = 3600
+    seed_len: int = 32
 
 # -----------------------------
 # Utilities
@@ -59,7 +61,7 @@ def derive_u16(count: int, vp: VeinnParams, *chunks: bytes) -> np.ndarray:
         seed_derive = shake(32, *chunks)
         return lwe_prf_expand(seed_derive, count, vp)
     raw = shake(count * 2, *chunks)
-    return np.frombuffer(raw, dtype=np.uint16)[:count].copy()
+    return np.frombuffer(raw, dtype=DTYPE)[:count].copy()
 
 def odd_constant_from_key(tag: bytes) -> int:
     x = int.from_bytes(shake(2, tag), 'little')
@@ -96,7 +98,7 @@ def int_ring_convolve(a, b, q, root):
     c = ntt(C, q, inv_root)
     return (c * inv_n) % q
 
-def ring_convolution(a, b, q, method="naive"):
+def ring_convolution(a, b, q, method="ntt"):
     """
     Ring convolution modulo q, drop-in replacement for your current method.
 
@@ -114,12 +116,14 @@ def ring_convolution(a, b, q, method="naive"):
         np.ndarray : coefficients of (a * b) mod (x^n+1, q)
     """
     n = len(a)
-    a = np.array(a, dtype=int) % q
-    b = np.array(b, dtype=int) % q
-
+    a = np.array(a, dtype='int64') % q
+    b = np.array(b, dtype='int64') % q
+    
+    np.seterr(over='ignore') # NOTE: Burp the overflow (first pass) for now. Fix when stable.
+    
     if method == "naive":
         # direct polynomial multiplication
-        res = np.zeros(2*n, dtype=int)
+        res = np.zeros(2*n, dtype='int64')
         for i in range(n):
             for j in range(n):
                 res[i+j] += a[i] * b[j]
@@ -140,12 +144,13 @@ def ring_convolution(a, b, q, method="naive"):
         # NTT requires q ≡ 1 mod 2n (so a primitive root exists)
         # toy implementation: only works if q is carefully chosen
         # Here we fallback to naive if q is unsuitable
+        # NOTE: Always falls back and degrades performance. Fix to improve speed
         if (q - 1) % (2*n) != 0:
             return ring_convolution(a, b, q, method="naive")
 
         # find primitive 2n-th root of unity modulo q
         g = find_primitive_root(q)
-        root = pow(g, (q - 1) // (2*n), q)
+        root = pow(g, (q - 1) // (4*n), q)
 
         A = ntt(a, root, q)
         B = ntt(b, root, q)
@@ -226,11 +231,11 @@ def lwe_prf_expand(seed: bytes, out_n: int, vp: VeinnParams) -> np.ndarray:
     """Generate pseudorandom parameters with LWE noise, avoiding recursion."""
     n = vp.n
     # Use SHAKE-256 directly for s and a to prevent recursive calls
-    s = np.frombuffer(shake(n * 2, seed, b"s"), dtype=np.uint16)[:n] & (Q - 1)
-    a = np.frombuffer(shake(n * 2, seed, b"A"), dtype=np.uint16)[:n] & (Q - 1)
+    s = np.frombuffer(shake(n * 8, seed, b"s"), dtype=DTYPE)[:n] & (Q - 1)
+    a = np.frombuffer(shake(n * 8, seed, b"A"), dtype=DTYPE)[:n] & (Q - 1)
     raw = shake(n, seed, b"e")
     e = (np.frombuffer(raw, dtype=np.uint8)[:n] % 3).astype(np.int64)  # Small noise
-    assert s.shape == (n,) and a.shape == (n,) and e.shape == (n,), "LWE parameter shape mismatch"
+    assert s.shape == (n,) and a.shape == (n,) and e.shape == (n,), f"LWE parameter shape mismatch{e.shape, a.shape, s.shape}"
     b = ring_convolution(a, s, Q, 'ntt').astype(np.int64)
     b = (b + e) % Q
     out = np.zeros(out_n, dtype=DTYPE)
@@ -283,7 +288,7 @@ def coupling_inverse(x: np.ndarray, cp: CouplingParams) -> np.ndarray:
 def make_shuffle_indices(n: int, stride: int) -> np.ndarray:
     if math.gcd(stride, n) != 1:
         raise ValueError(f"{bcolors.FAIL}shuffle_stride must be coprime with n{bcolors.ENDC}")
-    return np.array([(i * stride) % n for i in range(n)], dtype=np.int32)
+    return np.array([(i * stride) % n for i in range(n)], dtype=np.int64)
 
 def shuffle(x: np.ndarray, idx: np.ndarray) -> np.ndarray:
     assert x.shape[0] == idx.shape[0], f"Shuffle shape mismatch: input {x.shape}, indices {idx.shape}"
@@ -320,7 +325,7 @@ def modinv(a: int, m: int) -> int:
     return x % m
 
 def inv_vec_mod_q(arr: np.ndarray) -> np.ndarray:
-    out = np.zeros_like(arr, dtype=np.uint16)
+    out = np.zeros_like(arr, dtype=DTYPE)
     for i, v in enumerate(arr.astype(int).tolist()):
         if v % 2 == 0:
             raise ValueError(f"{bcolors.FAIL}Non-odd element encountered; not invertible modulo 2^16{bcolors.ENDC}")
@@ -328,7 +333,7 @@ def inv_vec_mod_q(arr: np.ndarray) -> np.ndarray:
     return out
 
 def ensure_odd_vec(arr: np.ndarray) -> np.ndarray:
-    arr = arr.copy().astype(np.uint16)
+    arr = arr.copy().astype(DTYPE)
     arr |= 1  # force odd
     return arr
 
@@ -400,7 +405,7 @@ def permute_inverse(x: np.ndarray, key: VeinnKey) -> np.ndarray:
 # -----------------------------
 def bytes_to_block(b: bytes, n: int) -> np.ndarray:
     # padded = b + b'\x00' * ((2 * n - len(b)) % (2 * n))
-    # arr = np.frombuffer(padded, dtype=np.uint16)
+    # arr = np.frombuffer(padded, dtype=DTYPE)
     # if arr.shape[0] < n:
     #     arr = np.pad(arr, (0, n - arr.shape[0]), mode='constant', constant_values=0)
     # return arr[:n].astype(DTYPE)
@@ -867,13 +872,13 @@ def menu_encrypt_with_pub():
         print("Public key not found. Generate RSA keys first.")        
     inpath = input("Optional input file path (blank = prompt): ").strip() or None
     mode = input("Mode: (t)ext or (n)umeric? [t]: ").strip().lower() or "t"
-    n = int(input("Number of uint16 words per block (default 8): ").strip() or 8)
-    rounds = int(input("Number of rounds (default 3): ").strip() or 3)
-    layers_per_round = int(input("Layers per round (default 2): ").strip() or 2)
-    shuffle_stride = int(input("Shuffle stride (default 7): ").strip() or 7)
+    n = int(input(f"Number of { DTYPE } words per block (default { VeinnParams.n }): ").strip() or VeinnParams.n)
+    rounds = int(input(f"Number of rounds (default { VeinnParams.rounds }): ").strip() or VeinnParams.rounds)
+    layers_per_round = int(input(f"Layers per round (default { VeinnParams.layers_per_round }): ").strip() or VeinnParams.layers_per_round)
+    shuffle_stride = int(input(f"Shuffle stride (default { VeinnParams.shuffle_stride }): ").strip() or VeinnParams.shuffle_stride)
     use_lwe = input("Use LWE PRF for key nonlinearity (y/n) [y]: ").strip().lower() or "y"
     use_lwe = use_lwe == "y"
-    seed_len = int(input("Seed length (default 32): ").strip() or 32)
+    seed_len = int(input(f"Seed length (default { VeinnParams.seed_len }): ").strip() or VeinnParams.seed_len)
     nonce_str = input("Custom nonce (base64, blank for random): ").strip() or None
     nonce = b64decode(nonce_str) if nonce_str else None
     vp = VeinnParams(n=n, rounds=rounds, layers_per_round=layers_per_round, shuffle_stride=shuffle_stride, use_lwe=use_lwe)
@@ -898,7 +903,7 @@ def menu_decrypt_with_priv():
     else:
         privfile = input("RSA private key file (default rsa_priv.json): ").strip() or "rsa_priv.json"
     encfile = input("Encrypted file to decrypt (default enc_pub.json): ").strip() or "enc_pub.json"
-    validity_window = int(input("Timestamp validity window in seconds (default 3600): ").strip() or 3600)
+    validity_window = int(input(f"Timestamp validity window in seconds (default { VeinnParams.valid }): ").strip() or VeinnParams.valid)
     if not os.path.exists(encfile):
         print("Encrypted file not found.")
     decrypt_with_priv(keystore, privfile, encfile, passphrase, key_name, validity_window)
@@ -926,10 +931,10 @@ def menu_veinn_from_seed():
         seed_input = seed_data["seed"]
     else:
         seed_input = input("Enter seed string (publicly shared): ").strip()
-    n = int(input("Number of uint16 words per block (default 8): ").strip() or 8)
-    rounds = int(input("Number of rounds (default 3): ").strip() or 3)
-    layers_per_round = int(input("Layers per round (default 2): ").strip() or 2)
-    shuffle_stride = int(input("Shuffle stride (default 7): ").strip() or 7)
+    n = int(input(f"Number of { DTYPE } words per block (default { VeinnParams.n }): ").strip() or VeinnParams.n)
+    rounds = int(input(f"Number of rounds (default { VeinnParams.rounds }): ").strip() or VeinnParams.rounds)
+    layers_per_round = int(input(f"Layers per round (default { VeinnParams.layers_per_round }): ").strip() or VeinnParams.layers_per_round)
+    shuffle_stride = int(input(f"Shuffle stride (default { VeinnParams.shuffle_stride }): ").strip() or VeinnParams.shuffle_stride)
     use_lwe = input("Use LWE PRF for key nonlinearity (y/n) [y]: ").strip().lower() or "y"
     use_lwe = use_lwe == "y"
     vp = VeinnParams(n=n, rounds=rounds, layers_per_round=layers_per_round, shuffle_stride=shuffle_stride, use_lwe=use_lwe)
@@ -958,10 +963,10 @@ def menu_encrypt_with_public_veinn():
         raw_nums = [s for s in content.replace(",", " ").split() if s != ""]
         numbers = [int(x) for x in raw_nums]
         bytes_per_number = int(input("Bytes per number (default 4): ").strip() or 4)
-    n = int(input("Number of uint16 words per block (default 8): ").strip() or 8)
-    rounds = int(input("Number of rounds (default 3): ").strip() or 3)
-    layers_per_round = int(input("Layers per round (default 2): ").strip() or 2)
-    shuffle_stride = int(input("Shuffle stride (default 7): ").strip() or 7)
+    n = int(input(f"Number of { DTYPE } words per block (default { VeinnParams.n }): ").strip() or VeinnParams.n)
+    rounds = int(input(f"Number of rounds (default { VeinnParams.rounds }): ").strip() or VeinnParams.rounds)
+    layers_per_round = int(input(f"Layers per round (default { VeinnParams.layers_per_round }): ").strip() or VeinnParams.layers_per_round)
+    shuffle_stride = int(input(f"Shuffle stride (default { VeinnParams.shuffle_stride }): ").strip() or VeinnParams.shuffle_stride)
     use_lwe = input("Use LWE PRF for key nonlinearity (y/n) [y]: ").strip().lower() or "y"
     use_lwe = use_lwe == "y"
     out_file = input("Output encrypted filename (default enc_pub_veinn.json): ").strip() or "enc_pub_veinn.json"
@@ -982,7 +987,7 @@ def menu_decrypt_with_public_veinn():
     else:
         seed_input = input("Enter public seed string: ").strip()
     enc_file = input("Encrypted file to decrypt (default enc_pub_veinn.json): ").strip() or "enc_pub_veinn.json"
-    validity_window = int(input("Timestamp validity window in seconds (default 3600): ").strip() or 3600)
+    validity_window = int(input(f"Timestamp validity window in seconds (default { VeinnParams.valid }): ").strip() or VeinnParams.valid)
     if not os.path.exists(enc_file):
         print("Encrypted file not found.")        
     decrypt_with_public_veinn(seed_input, enc_file, validity_window)
