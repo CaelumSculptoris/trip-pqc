@@ -58,6 +58,8 @@ cd veinn
 
 Install dependencies:
 ```bash
+python3 -m venv veinn
+source bin/activate
 pip install -r requirements.txt
 ```
 
@@ -197,10 +199,17 @@ MIT License
 
 ## Notes
 
-- Updates
+### Updates
    - Reorg experimental files to appropriate folder
    - Breakout modules into appropriate files (need to fix circular ref bug)
    - Added test.py with 12/13 passing tests reflecting stable encrypt/decrypt workflows
    - Updated veinn.py to leverage vectorspace for encrypting
    - Clean up and color CLI package and full file.
    - Remove experimental
+   - Upscale params for improved security
+   - Pivot off of params in menu options
+
+### TODO
+   - Fix ring_convolution to leverage ntt. Currently falls back to naive. Works, but slow.
+   - Fix burp overflow. Works but throws warning.
+
