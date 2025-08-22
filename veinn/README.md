@@ -209,8 +209,12 @@ MIT License
    - Remove experimental
    - Upscale params for improved security
    - Pivot off of params in menu options
+   - Fixed ring_convolution to leverage ntt. Speed improved.
+   - Removed ignore of overflow, no more overflows.
+   - Use vectorized instead of pointwise multiplication in ring_convolution
 
 ### TODO
-   - Fix ring_convolution to leverage ntt. Currently falls back to naive. Works, but slow.
-   - Fix burp overflow. Works but throws warning.
+   - Update command line implementations as currently the menu workflow is most stable.
+   - Refactor command lines to use menu methods... plenty of overlap.
+   - Update package with these most recent fixes
 

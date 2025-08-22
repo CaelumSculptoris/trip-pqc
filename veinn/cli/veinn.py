@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from base64 import b64encode, b64decode
 from dataclasses import dataclass
+
 # -----------------------------
 # CLI Colors
 # -----------------------------
@@ -33,8 +34,8 @@ class bcolors:
 # -----------------------------
 # Core Parameters
 # -----------------------------
-Q = 2**32  # Modulus
-DTYPE = np.uint64
+Q = 65537 #2**32  # Modulus
+DTYPE = np.int64
 
 @dataclass
 class VeinnParams:
@@ -86,18 +87,6 @@ def pkcs7_unpad(data: bytes) -> bytes:
 # -----------------------------
 # LWE-Based PRF
 # -----------------------------
-def int_ring_convolve(a, b, q, root):
-    """Convolution over Z_q[x]/(x^n+1) using NTT"""
-    n = len(a)
-    A = ntt(a, q, root)
-    B = ntt(b, q, root)
-    C = (A * B) % q
-    # Inverse NTT: use modular inverse of n and root
-    inv_n = pow(n, -1, q)
-    inv_root = pow(root, -1, q)
-    c = ntt(C, q, inv_root)
-    return (c * inv_n) % q
-
 def ring_convolution(a, b, q, method="ntt"):
     """
     Ring convolution modulo q, drop-in replacement for your current method.
@@ -116,14 +105,13 @@ def ring_convolution(a, b, q, method="ntt"):
         np.ndarray : coefficients of (a * b) mod (x^n+1, q)
     """
     n = len(a)
-    a = np.array(a, dtype='int64') % q
-    b = np.array(b, dtype='int64') % q
-    
-    np.seterr(over='ignore') # NOTE: Burp the overflow (first pass) for now. Fix when stable.
+    a = np.array(a, dtype=np.int64) % q
+    b = np.array(b, dtype=np.int64) % q
     
     if method == "naive":
+        print("naive")
         # direct polynomial multiplication
-        res = np.zeros(2*n, dtype='int64')
+        res = np.zeros(2*n, dtype=np.uint64)        
         for i in range(n):
             for j in range(n):
                 res[i+j] += a[i] * b[j]
@@ -141,21 +129,28 @@ def ring_convolution(a, b, q, method="ntt"):
         return res
 
     elif method == "ntt":
-        # NTT requires q ≡ 1 mod 2n (so a primitive root exists)
-        # toy implementation: only works if q is carefully chosen
-        # Here we fallback to naive if q is unsuitable
-        # NOTE: Always falls back and degrades performance. Fix to improve speed
-        if (q - 1) % (2*n) != 0:
-            return ring_convolution(a, b, q, method="naive")
+        # Pad input arrays to length 2n
+        a_padded = np.zeros(2*n, dtype=np.int64)
+        a_padded[:n] = a
+        b_padded = np.zeros(2*n, dtype=np.int64)
+        b_padded[:n] = b
 
         # find primitive 2n-th root of unity modulo q
         g = find_primitive_root(q)
-        root = pow(g, (q - 1) // (4*n), q)
+        root = pow(g, (q - 1) // (2 * n), q)
 
-        A = ntt(a, root, q)
-        B = ntt(b, root, q)
-        C = [(x*y) % q for x, y in zip(A, B)]
+        # Forward NTT transform on padded arrays
+        A = ntt(a_padded, root, q)
+        B = ntt(b_padded, root, q)
+        
+        # Pointwise multiplication of transformed polynomials    
+        #C = [(x*y) % q for x, y in zip(A, B)]
+        C = (A * B) % q  # Use vectorized multiplication
+        
+        # Inverse NTT transform to get the result
         res = intt(C, root, q)
+        
+        # Apply the ring reduction modulo (x^n + 1)
         res = (np.array(res[:n]) - np.array(res[n:])) % q
         return res
 
@@ -167,25 +162,31 @@ def ring_convolution(a, b, q, method="ntt"):
 # -----------------------------
 def ntt(a, root, q):
     n = len(a)
-    A = [0]*n
-    for k in range(n):
-        s = 0
-        for j in range(n):
-            s = (s + a[j] * pow(root, (j*k) % (2*n), q)) % q
-        A[k] = s
-    return A
+    if n == 1:
+        return a
+
+    # Split the polynomial into even and odd coefficients
+    a_even = ntt(a[0::2], pow(root, 2, q), q)
+    a_odd = ntt(a[1::2], pow(root, 2, q), q)
+
+    T = np.zeros(n, dtype=np.int64)
+
+    for i in range(n // 2):
+        t = (a_odd[i] * pow(root, i, q)) % q
+        T[i] = (a_even[i] + t) % q
+        T[i + n // 2] = (a_even[i] - t) % q
+    
+    return T
 
 def intt(A, root, q):
     n = len(A)
-    inv_n = pow(n, -1, q)
+    # Calculate the inverse of the root for the inverse transform
     root_inv = pow(root, -1, q)
-    a = [0]*n
-    for j in range(n):
-        s = 0
-        for k in range(n):
-            s = (s + A[k] * pow(root_inv, (j*k) % (2*n), q)) % q
-        a[j] = (s * inv_n) % q
-    return a
+    # Perform the forward NTT on A with the inverse root
+    a = ntt(A, root_inv, q)
+    # Scale the result by the modular inverse of n
+    inv_n = pow(n, -1, q)
+    return (a * inv_n) % q
 
 def find_primitive_root(q):
     """Finds a primitive root modulo q (very naive)."""
@@ -211,21 +212,6 @@ def factorize(n):
     if n > 1:
         factors.add(n)
     return list(factors)
-
-def negacyclic_convolution(a: np.ndarray, b: np.ndarray, q: int) -> np.ndarray:
-    """O(n^2) negacyclic convolution in Z_q[x]/(x^n+1)."""
-    assert a.shape == b.shape, f"Convolution shape mismatch: a {a.shape}, b {b.shape}"
-    n = a.shape[0]
-    res = np.zeros(n, dtype=np.int64)
-    a_int = a.astype(np.int64)
-    b_int = b.astype(np.int64)
-    for i in range(n):
-        ai = a_int[i]
-        for j in range(n):
-            k = (i + j) % n
-            sign = -1 if (i + j) >= n else 1
-            res[k] = (res[k] + ai * b_int[j] * sign)
-    return (res % q).astype(DTYPE)
 
 def lwe_prf_expand(seed: bytes, out_n: int, vp: VeinnParams) -> np.ndarray:
     """Generate pseudorandom parameters with LWE noise, avoiding recursion."""
@@ -327,15 +313,13 @@ def modinv(a: int, m: int) -> int:
 def inv_vec_mod_q(arr: np.ndarray) -> np.ndarray:
     out = np.zeros_like(arr, dtype=DTYPE)
     for i, v in enumerate(arr.astype(int).tolist()):
-        if v % 2 == 0:
-            raise ValueError(f"{bcolors.FAIL}Non-odd element encountered; not invertible modulo 2^16{bcolors.ENDC}")
         out[i] = modinv(v, Q)
     return out
 
-def ensure_odd_vec(arr: np.ndarray) -> np.ndarray:
-    arr = arr.copy().astype(DTYPE)
-    arr |= 1  # force odd
-    return arr
+def ensure_coprime_to_q_vec(vec, q):
+    # Change any multiples of q to 1 to ensure invertibility
+    vec = np.where(vec % q == 0, 1, vec)
+    return vec
 
 # -----------------------------
 # Veinn Key
@@ -363,13 +347,17 @@ def key_from_seed(seed: bytes, vp: VeinnParams) -> VeinnKey:
 
         # Derive invertible per-word scaling (odd => invertible mod 2^16)
         scale = derive_u16(n, vp, seed, b"ring", bytes([r]))
-        scale = ensure_odd_vec(scale)
+        # Convert to a signed integer type to prevent overflow
+        scale = scale.astype(np.int64)
+        # Ensure all elements are coprime to Q
+        scale = ensure_coprime_to_q_vec(scale, Q)
         scale_inv = inv_vec_mod_q(scale)
 
         assert scale.shape == (n,), f"Ring scale shape mismatch: expected {(n,)}, got {scale.shape}"
         assert scale_inv.shape == (n,), f"Ring inv shape mismatch: expected {(n,)}, got {scale_inv.shape}"
         rounds.append(RoundParams(cpls, scale, scale_inv))
     return VeinnKey(seed=seed, params=vp, shuffle_idx=shuffle_idx, rounds=rounds)
+
 
 # -----------------------------
 # Permutation (updated to use invertible scaling)
@@ -404,17 +392,11 @@ def permute_inverse(x: np.ndarray, key: VeinnKey) -> np.ndarray:
 # Block Helpers
 # -----------------------------
 def bytes_to_block(b: bytes, n: int) -> np.ndarray:
-    # padded = b + b'\x00' * ((2 * n - len(b)) % (2 * n))
-    # arr = np.frombuffer(padded, dtype=DTYPE)
-    # if arr.shape[0] < n:
-    #     arr = np.pad(arr, (0, n - arr.shape[0]), mode='constant', constant_values=0)
-    # return arr[:n].astype(DTYPE)
     padded = b.ljust(2 * n, b'\x00')
     arr = np.frombuffer(padded, dtype='<u2')[:n].copy()
     return arr.astype(DTYPE)
 
 def block_to_bytes(x: np.ndarray) -> bytes:
-    # return x.tobytes()
     return x.astype('<u2').tobytes()
 
 # -----------------------------
@@ -739,7 +721,7 @@ def decrypt_with_priv(keystore: Optional[str], privfile: Optional[str], encfile:
     else:
         bytes_per_number = metadata.get("bytes_per_number", vp.n * 2)
         numbers = [int.from_bytes(dec_bytes[i:i + bytes_per_number], 'big', signed=True)
-                   for i in range(0, len(dec_bytes), bytes_per_number)]
+                for i in range(0, len(dec_bytes), bytes_per_number)]
         print("Decrypted numbers:", numbers)
 
 def encrypt_with_public_veinn(seed_input: str, message: Optional[str] = None, numbers: Optional[list] = None, vp: VeinnParams = VeinnParams(), out_file: str = "enc_pub_veinn.json", mode: str = "t", bytes_per_number: Optional[int] = None, nonce: Optional[bytes] = None) -> str:
@@ -1128,8 +1110,7 @@ def main():
             print(f"{bcolors.GREY}9) Derive public VEINN from seed{bcolors.ENDC}")
 
             print(f"{bcolors.BOLD}0){bcolors.ENDC} Exit")
-            choice = input(f"{bcolors.BOLD}Choice: {bcolors.ENDC}").strip()
-
+            choice = input(f"{bcolors.BOLD}Choice: {bcolors.ENDC}").strip()            
             try:
                 match choice:
                     case "0":
@@ -1156,7 +1137,7 @@ def main():
                         print("Invalid choice")
             except Exception as e:
                 print(f"{bcolors.FAIL}ERROR:{bcolors.ENDC}", e)
-            _=input(f"{bcolors.OKGREEN}Any Key to Continue{bcolors.ENDC}")
+            _=input(f"{bcolors.OKGREEN}Enter to continue...{bcolors.ENDC}")
             _=os.system("cls") | os.system("clear")
     except Exception as e:
         print(f"{bcolors.FAIL}ERROR:{bcolors.ENDC}", e)
