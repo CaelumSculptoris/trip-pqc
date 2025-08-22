@@ -1000,7 +1000,7 @@ def main():
     generate_rsa_parser.add_argument("--bits", type=int, default=2048, help="RSA key size in bits")
     generate_rsa_parser.add_argument("--pubfile", default="rsa_pub.json", help="Public key filename")
     generate_rsa_parser.add_argument("--privfile", default="rsa_priv.json", help="Private key filename")
-    generate_rsa_parser.add_argument("--keystore", help="Keystore filename for private key")
+    generate_rsa_parser.add_argument("--keystore", default="keystore.json", help="Keystore filename for private key")
     generate_rsa_parser.add_argument("--passphrase", help="Keystore passphrase")
     generate_rsa_parser.add_argument("--key_name", help="Key name in keystore")
 
@@ -1009,10 +1009,10 @@ def main():
     public_encrypt_parser.add_argument("--pubfile", default="rsa_pub.json", help="RSA public key file")
     public_encrypt_parser.add_argument("--in_path", help="Input file path")
     public_encrypt_parser.add_argument("--mode", choices=["t", "n"], default="t", help="Input mode")
-    public_encrypt_parser.add_argument("--n", type=int, default=8, help="Number of uint16 words per block")
-    public_encrypt_parser.add_argument("--rounds", type=int, default=3, help="Number of rounds")
-    public_encrypt_parser.add_argument("--layers_per_round", type=int, default=2, help="Layers per round")
-    public_encrypt_parser.add_argument("--shuffle_stride", type=int, default=7, help="Shuffle stride")
+    public_encrypt_parser.add_argument("--n", type=int, default=VeinnParams.n, help="Number of uint16 words per block")
+    public_encrypt_parser.add_argument("--rounds", type=int, default=VeinnParams.rounds, help="Number of rounds")
+    public_encrypt_parser.add_argument("--layers_per_round", type=int, default=VeinnParams.layers_per_round, help="Layers per round")
+    public_encrypt_parser.add_argument("--shuffle_stride", type=int, default=VeinnParams.shuffle_stride, help="Shuffle stride")
     public_encrypt_parser.add_argument("--use_lwe", type=bool, default=True, help="Use LWE PRF")
     public_encrypt_parser.add_argument("--seed_len", type=int, default=32, help="Seed length")
     public_encrypt_parser.add_argument("--nonce", help="Custom nonce (base64)")
@@ -1020,7 +1020,7 @@ def main():
 
     # Subparser for decryption
     public_decrypt_parser = subparsers.add_parser("public_decrypt", help="Decrypt with private key")
-    public_decrypt_parser.add_argument("--keystore", help="Keystore filename")
+    public_decrypt_parser.add_argument("--keystore", default="keystore.json", help="Keystore filename")
     public_decrypt_parser.add_argument("--privfile", default="rsa_priv.json", help="Private key file")
     public_decrypt_parser.add_argument("--encfile", default="enc_pub.json", help="Encrypted file")
     public_decrypt_parser.add_argument("--passphrase", help="Keystore passphrase")
@@ -1094,51 +1094,52 @@ def main():
                     use_lwe=args.use_lwe
                 )
                 veinn_from_seed(args.seed, vp)
-        _=os.system("cls") | os.system("clear")        
-        while True:
-            print(f"{bcolors.OKCYAN}VEINN CLI — Lattice-based INN with LWE-based Key Nonlinearity{bcolors.ENDC}")
-            print(f"{bcolors.OKCYAN}Nonlinearity via LWE PRF; linear INN for invertibility and homomorphism.{bcolors.ENDC}")
-            print("")
-            print(f"{bcolors.BOLD}1){bcolors.ENDC} Create encrypted keystore")
-            print(f"{bcolors.BOLD}2){bcolors.ENDC} Generate RSA keypair (public/private)")
-            print(f"{bcolors.BOLD}3){bcolors.ENDC} Encrypt with recipient public key (RSA + VEINN)")
-            print(f"{bcolors.BOLD}4){bcolors.ENDC} Decrypt with private key")
-            print(f"{bcolors.BOLD}5){bcolors.ENDC} Encrypt deterministically using public VEINN")
-            print(f"{bcolors.BOLD}6){bcolors.ENDC} Decrypt deterministically using public VEINN")
-            print(f"{bcolors.GREY}7) Lattice-based homomorphic add (file1, file2 -> out){bcolors.ENDC}")
-            print(f"{bcolors.GREY}8) Lattice-based homomorphic multiply (file1, file2 -> out){bcolors.ENDC}")
-            print(f"{bcolors.GREY}9) Derive public VEINN from seed{bcolors.ENDC}")
+            case _:                
+                _=os.system("cls") | os.system("clear")        
+                while True:
+                    print(f"{bcolors.OKCYAN}VEINN CLI — Lattice-based INN with LWE-based Key Nonlinearity{bcolors.ENDC}")
+                    print(f"{bcolors.OKCYAN}Nonlinearity via LWE PRF; linear INN for invertibility and homomorphism.{bcolors.ENDC}")
+                    print("")
+                    print(f"{bcolors.BOLD}1){bcolors.ENDC} Create encrypted keystore")
+                    print(f"{bcolors.BOLD}2){bcolors.ENDC} Generate RSA keypair (public/private)")
+                    print(f"{bcolors.BOLD}3){bcolors.ENDC} Encrypt with recipient public key (RSA + VEINN)")
+                    print(f"{bcolors.BOLD}4){bcolors.ENDC} Decrypt with private key")
+                    print(f"{bcolors.BOLD}5){bcolors.ENDC} Encrypt deterministically using public VEINN")
+                    print(f"{bcolors.BOLD}6){bcolors.ENDC} Decrypt deterministically using public VEINN")
+                    print(f"{bcolors.GREY}7) Lattice-based homomorphic add (file1, file2 -> out){bcolors.ENDC}")
+                    print(f"{bcolors.GREY}8) Lattice-based homomorphic multiply (file1, file2 -> out){bcolors.ENDC}")
+                    print(f"{bcolors.GREY}9) Derive public VEINN from seed{bcolors.ENDC}")
 
-            print(f"{bcolors.BOLD}0){bcolors.ENDC} Exit")
-            choice = input(f"{bcolors.BOLD}Choice: {bcolors.ENDC}").strip()            
-            try:
-                match choice:
-                    case "0":
-                        break
-                    case "1":
-                        menu_generate_keystore()
-                    case "2":
-                        menu_generate_rsa_keypair()
-                    case "3":
-                        menu_encrypt_with_pub()
-                    case "4":
-                        menu_decrypt_with_priv()
-                    case "5":
-                        menu_encrypt_with_public_veinn()
-                    case "6":
-                        menu_decrypt_with_public_veinn()
-                    case "7":
-                        menu_homomorphic_add_files()
-                    case "8":
-                        menu_homomorphic_mul_files()
-                    case "9":                        
-                        menu_veinn_from_seed()
-                    case _:
-                        print("Invalid choice")
-            except Exception as e:
-                print(f"{bcolors.FAIL}ERROR:{bcolors.ENDC}", e)
-            _=input(f"{bcolors.OKGREEN}Enter to continue...{bcolors.ENDC}")
-            _=os.system("cls") | os.system("clear")
+                    print(f"{bcolors.BOLD}0){bcolors.ENDC} Exit")
+                    choice = input(f"{bcolors.BOLD}Choice: {bcolors.ENDC}").strip()            
+                    try:
+                        match choice:
+                            case "0":
+                                break
+                            case "1":
+                                menu_generate_keystore()
+                            case "2":
+                                menu_generate_rsa_keypair()
+                            case "3":
+                                menu_encrypt_with_pub()
+                            case "4":
+                                menu_decrypt_with_priv()
+                            case "5":
+                                menu_encrypt_with_public_veinn()
+                            case "6":
+                                menu_decrypt_with_public_veinn()
+                            case "7":
+                                menu_homomorphic_add_files()
+                            case "8":
+                                menu_homomorphic_mul_files()
+                            case "9":                        
+                                menu_veinn_from_seed()
+                            case _:
+                                print("Invalid choice")
+                    except Exception as e:
+                        print(f"{bcolors.FAIL}ERROR:{bcolors.ENDC}", e)
+                    _=input(f"{bcolors.OKGREEN}Enter to continue...{bcolors.ENDC}")
+                    _=os.system("cls") | os.system("clear")
     except Exception as e:
         print(f"{bcolors.FAIL}ERROR:{bcolors.ENDC}", e)
         sys.exit(1)
