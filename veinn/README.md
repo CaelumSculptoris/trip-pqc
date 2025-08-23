@@ -201,20 +201,8 @@ MIT License
    - 25 YoE in software engineering, frontend frameworks specialist. Zero YoE Python/Cryptography. Please dont judge me too strongly, I know the code looks like garbage. Primarily trying to get a working and stable PoC before I refactor the code and abstract the VEINN primitive out as an importable class. If you'd like to help clean up some of my code, create a pull request.
 
 ### Updates
-   - Reorg experimental files to appropriate folder
-   - Breakout modules into appropriate files (need to fix circular ref bug)
-   - Added test.py with 12/13 passing tests reflecting stable encrypt/decrypt workflows
-   - Updated veinn.py to leverage vectorspace for encrypting
-   - Clean up and color CLI package and full file.
-   - Remove experimental
-   - Upscale params for improved security
-   - Pivot off of params in menu options
-   - Fixed ring_convolution to leverage ntt. Speed improved.
-   - Removed ignore of overflow, no more overflows.
-   - Use vectorized instead of pointwise multiplication in ring_convolution
+   - Kyber crystals, cause i'm a Jedi.
 
 ### TODO
-   - Update command line implementations as currently the menu workflow is most stable.
-   - Refactor command lines to use menu methods... plenty of overlap.
-   - Update package with these most recent fixes
+   - Integrate updates to command line and package.
 

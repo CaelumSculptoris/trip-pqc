@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from base64 import b64encode, b64decode
 from dataclasses import dataclass
+from kyber_py.ml_kem import ML_KEM_768  # Using ML_KEM_768 for ~128-bit security
 
 # -----------------------------
 # CLI Colors
@@ -46,6 +47,7 @@ class VeinnParams:
     use_lwe: bool = True
     valid: int = 3600
     seed_len: int = 32
+    q: int = Q
 
 # -----------------------------
 # Utilities
@@ -549,6 +551,13 @@ def bytes_be_to_int(b: bytes) -> int:
     return int.from_bytes(b, 'big')
 
 # -----------------------------
+# Kyber Key Generation
+# -----------------------------
+def generate_kyber_keypair() -> dict:
+    ek, dk = ML_KEM_768.keygen()
+    return {"ek": list(ek), "dk": list(dk)}  # Store as lists for JSON
+
+# -----------------------------
 # Encryption/Decryption
 # -----------------------------
 def derive_seed_bytes(nonce: bytes, seed_len: int = 32) -> bytes:
@@ -606,8 +615,7 @@ def veinn_from_seed(seed_input: str, vp: VeinnParams):
 def encrypt_with_pub(pubfile: str, message: Optional[str] = None, numbers: Optional[list] = None, in_path: Optional[str] = None, mode: str = "t", vp: VeinnParams = VeinnParams(), seed_len: int = 32, nonce: Optional[bytes] = None, out_file: str = "enc_pub.json") -> str:
     with open(pubfile, "r") as f:
         pub = json.load(f)
-    n = pub["n"]
-    e = pub["e"]
+    ek = bytes(pub["ek"])
     if in_path:
         with open(in_path, "rb") as f:
             message_bytes = f.read()
@@ -624,15 +632,12 @@ def encrypt_with_pub(pubfile: str, message: Optional[str] = None, numbers: Optio
             message_bytes += num.to_bytes(bytes_per_number, 'big', signed=True)
     message_bytes = pkcs7_pad(message_bytes, vp.n * 2)
     nonce = nonce or secrets.token_bytes(16)
-    ephemeral_seed = derive_seed_bytes(nonce, seed_len)
+    ephemeral_seed, ct = ML_KEM_768.encaps(ek)
     k = key_from_seed(ephemeral_seed, vp)
     blocks = [bytes_to_block(message_bytes[i:i + vp.n * 2], vp.n) for i in range(0, len(message_bytes), vp.n * 2)]
     for b in blocks:
-        assert b.shape == (vp.n,), f"Block shape mismatch: expected {(vp.n,)}, got {b.shape}"
+        assert b.shape == (vp.n,)
     enc_blocks = [permute_forward(b, k) for b in blocks]
-    seed_int = oaep_encode(ephemeral_seed, n, nonce)
-    enc_seed = pow(seed_int, e, n)
-    enc_seed_bytes = int_to_bytes_be(enc_seed)  # HMAC uses this raw (unpadded) form
     metadata = {
         "n": vp.n,
         "rounds": vp.rounds,
@@ -643,9 +648,9 @@ def encrypt_with_pub(pubfile: str, message: Optional[str] = None, numbers: Optio
         "bytes_per_number": vp.n * 2
     }
     timestamp = time.time()
-    msg_for_hmac = enc_seed_bytes + b"".join(block_to_bytes(b) for b in enc_blocks) + math.floor(timestamp).to_bytes(8, 'big')
+    msg_for_hmac = ct + b"".join(block_to_bytes(b) for b in enc_blocks) + math.floor(timestamp).to_bytes(8, 'big')
     hmac_value = hmac.new(ephemeral_seed, msg_for_hmac, hashlib.sha256).hexdigest()
-    write_ciphertext_json(out_file, enc_blocks, metadata, enc_seed_bytes, hmac_value, nonce, timestamp)
+    write_ciphertext_json(out_file, enc_blocks, metadata, ct, hmac_value, nonce, timestamp)
     print(f"Encrypted to {out_file}")
     return out_file
 
@@ -655,16 +660,14 @@ def decrypt_with_priv(keystore: Optional[str], privfile: Optional[str], encfile:
     else:
         with open(privfile, "r") as f:
             privkey = json.load(f)
-    n = privkey["n"]
-    d = privkey["d"]
+    dk = bytes(privkey["dk"])
     metadata, enc_seed_bytes, enc_blocks, hmac_value, nonce, timestamp = read_ciphertext(encfile)
+    assert isinstance(enc_seed_bytes, bytes), "Encrypted seed must be bytes"
+    if nonce is not None:
+        assert isinstance(nonce, bytes), "Nonce must be bytes"
     if not validate_timestamp(timestamp, validity_window):
         raise ValueError(f"{bcolors.FAIL}Timestamp outside validity window{bcolors.ENDC}")
-    # RSA decrypt OAEP
-    enc_seed_int = bytes_be_to_int(enc_seed_bytes)
-    seed_int = pow(enc_seed_int, d, n)
-    ephemeral_seed = oaep_decode(seed_int, n)
-    # Verify HMAC
+    ephemeral_seed = ML_KEM_768.decaps(dk, enc_seed_bytes)
     msg_for_hmac = enc_seed_bytes + b"".join(block_to_bytes(b) for b in enc_blocks) + math.floor(timestamp).to_bytes(8, 'big')
     if not hmac.compare_digest(hmac.new(ephemeral_seed, msg_for_hmac, hashlib.sha256).hexdigest(), hmac_value):
         raise ValueError(f"{bcolors.FAIL}HMAC verification failed{bcolors.ENDC}")
@@ -686,7 +689,7 @@ def decrypt_with_priv(keystore: Optional[str], privfile: Optional[str], encfile:
     else:
         bytes_per_number = metadata.get("bytes_per_number", vp.n * 2)
         numbers = [int.from_bytes(dec_bytes[i:i + bytes_per_number], 'big', signed=True)
-                for i in range(0, len(dec_bytes), bytes_per_number)]
+                   for i in range(0, len(dec_bytes), bytes_per_number)]
         print("Decrypted numbers:", numbers)
 
 def encrypt_with_public_veinn(seed_input: str, message: Optional[str] = None, numbers: Optional[list] = None, vp: VeinnParams = VeinnParams(), out_file: str = "enc_pub_veinn.json", mode: str = "t", bytes_per_number: Optional[int] = None, nonce: Optional[bytes] = None) -> str:
@@ -760,13 +763,13 @@ def decrypt_with_public_veinn(seed_input: str, enc_file: str, validity_window: i
 def write_ciphertext_json(path: str, encrypted_blocks: list, metadata: dict, enc_seed_bytes: bytes, hmac_value: str = None, nonce: bytes = None, timestamp: float = None):
     payload = {
         "veinn_metadata": metadata,
-        "enc_seed": [int(b) for b in enc_seed_bytes],
+        "enc_seed_b64": b64encode(enc_seed_bytes).decode(),  # Kyber ciphertext as base64
         "encrypted": [[int(x) for x in blk.tolist()] for blk in encrypted_blocks]
     }
     if hmac_value:
         payload["hmac"] = hmac_value
     if nonce:
-        payload["nonce"] = [int(b) for b in nonce]
+        payload["nonce_b64"] = b64encode(nonce).decode()  # Nonce as base64
     if timestamp:
         payload["timestamp"] = timestamp
     with open(path, "w") as f:
@@ -775,11 +778,11 @@ def write_ciphertext_json(path: str, encrypted_blocks: list, metadata: dict, enc
 def read_ciphertext(path: str):
     with open(path, "r") as f:
         payload = json.load(f)
-    enc_seed = bytes([int(b) for b in payload["enc_seed"]])
+    enc_seed = b64decode(payload["enc_seed_b64"])  # Decode Kyber ciphertext
     metadata = payload["veinn_metadata"]
     enc_blocks = [np.array([int(x) for x in blk], dtype=DTYPE) for blk in payload["encrypted"]]
     hmac_value = payload.get("hmac")
-    nonce = bytes([int(b) for b in payload.get("nonce", [])]) if "nonce" in payload else None
+    nonce = b64decode(payload.get("nonce_b64", "")) if payload.get("nonce_b64") else None  # Decode nonce
     timestamp = payload.get("timestamp")
     return metadata, enc_seed, enc_blocks, hmac_value, nonce, timestamp
 
@@ -791,9 +794,8 @@ def menu_generate_keystore():
     keystore_file = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
     create_keystore(passphrase, keystore_file)
 
-def menu_generate_rsa_keypair():
-    bits = int(input("RSA key size in bits (default 2048): ").strip() or 2048)
-    pubfile = input("Public key filename (default rsa_pub.json): ").strip() or "rsa_pub.json"
+def menu_generate_kyber_keypair():
+    pubfile = input("Public key filename (default kyber_pub.json): ").strip() or "kyber_pub.json"
     use_keystore = input("Store private key in keystore? (y/n): ").strip().lower() or "y"
     privfile, keystore, passphrase, key_name = None, None, None, None
     if use_keystore == "y":
@@ -801,34 +803,36 @@ def menu_generate_rsa_keypair():
         passphrase = input("Keystore passphrase: ")
         key_name = input("Key name in keystore: ")
     else:
-        privfile = input("Private key filename (default rsa_priv.json): ").strip() or "rsa_priv.json"
-    keypair = generate_rsa_keypair(bits)
+        privfile = input("Private key filename (default kyber_priv.json): ").strip() or "kyber_priv.json"
+    keypair = generate_kyber_keypair()
     with open(pubfile, "w") as f:
-        json.dump({"n": keypair["n"], "e": keypair["e"]}, f)
+        json.dump({"ek": keypair["ek"]}, f)
     if use_keystore == "y":
         store_key_in_keystore(passphrase, key_name, keypair, keystore)
-        print(f"RSA keys generated: {pubfile} (public), private stored in keystore")
+        print(f"Kyber keys generated: {pubfile} (public), private stored in keystore")
     else:
         with open(privfile, "w") as f:
             json.dump(keypair, f)
-        print(f"RSA keys generated: {pubfile} (public), {privfile} (private)")
+        print(f"Kyber keys generated: {pubfile} (public), {privfile} (private)")
 
 def menu_encrypt_with_pub():
-    pubfile = input("Recipient RSA public key file (default rsa_pub.json): ").strip() or "rsa_pub.json"
+    pubfile = input("Recipient Kyber public key file (default kyber_pub.json): ").strip() or "kyber_pub.json"
     if not os.path.exists(pubfile):
-        print("Public key not found. Generate RSA keys first.")        
+        print("Public key not found. Generate Kyber keys first.")
+        return
     inpath = input("Optional input file path (blank = prompt): ").strip() or None
     mode = input("Mode: (t)ext or (n)umeric? [t]: ").strip().lower() or "t"
-    n = int(input(f"Number of { DTYPE } words per block (default { VeinnParams.n }): ").strip() or VeinnParams.n)
-    rounds = int(input(f"Number of rounds (default { VeinnParams.rounds }): ").strip() or VeinnParams.rounds)
-    layers_per_round = int(input(f"Layers per round (default { VeinnParams.layers_per_round }): ").strip() or VeinnParams.layers_per_round)
-    shuffle_stride = int(input(f"Shuffle stride (default { VeinnParams.shuffle_stride }): ").strip() or VeinnParams.shuffle_stride)
+    n = int(input(f"Number of {DTYPE} words per block (default {VeinnParams.n}): ").strip() or VeinnParams.n)
+    rounds = int(input(f"Number of rounds (default {VeinnParams.rounds}): ").strip() or VeinnParams.rounds)
+    layers_per_round = int(input(f"Layers per round (default {VeinnParams.layers_per_round}): ").strip() or VeinnParams.layers_per_round)
+    shuffle_stride = int(input(f"Shuffle stride (default {VeinnParams.shuffle_stride}): ").strip() or VeinnParams.shuffle_stride)
     use_lwe = input("Use LWE PRF for key nonlinearity (y/n) [y]: ").strip().lower() or "y"
     use_lwe = use_lwe == "y"
-    seed_len = int(input(f"Seed length (default { VeinnParams.seed_len }): ").strip() or VeinnParams.seed_len)
+    seed_len = int(input(f"Seed length (default {VeinnParams.seed_len}): ").strip() or VeinnParams.seed_len)
     nonce_str = input("Custom nonce (base64, blank for random): ").strip() or None
     nonce = b64decode(nonce_str) if nonce_str else None
-    vp = VeinnParams(n=n, rounds=rounds, layers_per_round=layers_per_round, shuffle_stride=shuffle_stride, use_lwe=use_lwe)
+    q = int(input(f"Modulus q (default {Q}): ").strip() or Q)
+    vp = VeinnParams(n=n, rounds=rounds, layers_per_round=layers_per_round, shuffle_stride=shuffle_stride, use_lwe=use_lwe, q=q)
     message = None
     numbers = None
     if inpath is None:
@@ -848,11 +852,12 @@ def menu_decrypt_with_priv():
         passphrase = input("Keystore passphrase: ")
         key_name = input("Key name in keystore: ")
     else:
-        privfile = input("RSA private key file (default rsa_priv.json): ").strip() or "rsa_priv.json"
+        privfile = input("Kyber private key file (default kyber_priv.json): ").strip() or "kyber_priv.json"
     encfile = input("Encrypted file to decrypt (default enc_pub.json): ").strip() or "enc_pub.json"
-    validity_window = int(input(f"Timestamp validity window in seconds (default { VeinnParams.valid }): ").strip() or VeinnParams.valid)
+    validity_window = int(input(f"Timestamp validity window in seconds (default {VeinnParams.valid}): ").strip() or VeinnParams.valid)
     if not os.path.exists(encfile):
         print("Encrypted file not found.")
+        return
     decrypt_with_priv(keystore, privfile, encfile, passphrase, key_name, validity_window)
 
 def menu_homomorphic_add_files():
@@ -878,13 +883,14 @@ def menu_veinn_from_seed():
         seed_input = seed_data["seed"]
     else:
         seed_input = input("Enter seed string (publicly shared): ").strip()
-    n = int(input(f"Number of { DTYPE } words per block (default { VeinnParams.n }): ").strip() or VeinnParams.n)
-    rounds = int(input(f"Number of rounds (default { VeinnParams.rounds }): ").strip() or VeinnParams.rounds)
-    layers_per_round = int(input(f"Layers per round (default { VeinnParams.layers_per_round }): ").strip() or VeinnParams.layers_per_round)
-    shuffle_stride = int(input(f"Shuffle stride (default { VeinnParams.shuffle_stride }): ").strip() or VeinnParams.shuffle_stride)
+    n = int(input(f"Number of {DTYPE} words per block (default {VeinnParams.n}): ").strip() or VeinnParams.n)
+    rounds = int(input(f"Number of rounds (default {VeinnParams.rounds}): ").strip() or VeinnParams.rounds)
+    layers_per_round = int(input(f"Layers per round (default {VeinnParams.layers_per_round}): ").strip() or VeinnParams.layers_per_round)
+    shuffle_stride = int(input(f"Shuffle stride (default {VeinnParams.shuffle_stride}): ").strip() or VeinnParams.shuffle_stride)
     use_lwe = input("Use LWE PRF for key nonlinearity (y/n) [y]: ").strip().lower() or "y"
     use_lwe = use_lwe == "y"
-    vp = VeinnParams(n=n, rounds=rounds, layers_per_round=layers_per_round, shuffle_stride=shuffle_stride, use_lwe=use_lwe)
+    q = int(input(f"Modulus q (default {Q}): ").strip() or Q)
+    vp = VeinnParams(n=n, rounds=rounds, layers_per_round=layers_per_round, shuffle_stride=shuffle_stride, use_lwe=use_lwe, q=q)
     veinn_from_seed(seed_input, vp)
 
 def menu_encrypt_with_public_veinn():
@@ -893,7 +899,7 @@ def menu_encrypt_with_public_veinn():
     if use_keystore == "y":
         keystore = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
         passphrase = input("Keystore passphrase: ")
-        key_name = input("Seed name in keystore: ")                            
+        key_name = input("Seed name in keystore: ")
         store_key_in_keystore(passphrase, key_name, {"seed": key_name}, keystore)
         seed_data = retrieve_key_from_keystore(passphrase, key_name, keystore)
         seed_input = seed_data["seed"]
@@ -909,18 +915,19 @@ def menu_encrypt_with_public_veinn():
         content = input("Enter numbers (comma or whitespace separated): ").strip()
         raw_nums = [s for s in content.replace(",", " ").split() if s != ""]
         numbers = [int(x) for x in raw_nums]
-        bytes_per_number = int(input("Bytes per number (default 4): ").strip() or 4)
-    n = int(input(f"Number of { DTYPE } words per block (default { VeinnParams.n }): ").strip() or VeinnParams.n)
-    rounds = int(input(f"Number of rounds (default { VeinnParams.rounds }): ").strip() or VeinnParams.rounds)
-    layers_per_round = int(input(f"Layers per round (default { VeinnParams.layers_per_round }): ").strip() or VeinnParams.layers_per_round)
-    shuffle_stride = int(input(f"Shuffle stride (default { VeinnParams.shuffle_stride }): ").strip() or VeinnParams.shuffle_stride)
+        bytes_per_number = int(input("Bytes per number (default 8): ").strip() or 8)
+    n = int(input(f"Number of {DTYPE} words per block (default {VeinnParams.n}): ").strip() or VeinnParams.n)
+    rounds = int(input(f"Number of rounds (default {VeinnParams.rounds}): ").strip() or VeinnParams.rounds)
+    layers_per_round = int(input(f"Layers per round (default {VeinnParams.layers_per_round}): ").strip() or VeinnParams.layers_per_round)
+    shuffle_stride = int(input(f"Shuffle stride (default {VeinnParams.shuffle_stride}): ").strip() or VeinnParams.shuffle_stride)
     use_lwe = input("Use LWE PRF for key nonlinearity (y/n) [y]: ").strip().lower() or "y"
     use_lwe = use_lwe == "y"
+    q = int(input(f"Modulus q (default {Q}): ").strip() or Q)
     out_file = input("Output encrypted filename (default enc_pub_veinn.json): ").strip() or "enc_pub_veinn.json"
     nonce_str = input("Custom nonce (base64, blank for random): ").strip() or None
     nonce = b64decode(nonce_str) if nonce_str else None
-    vp = VeinnParams(n=n, rounds=rounds, layers_per_round=layers_per_round, shuffle_stride=shuffle_stride, use_lwe=use_lwe)
-    out_file = encrypt_with_public_veinn(seed_input, message, numbers, vp, out_file, mode, bytes_per_number, nonce)   
+    vp = VeinnParams(n=n, rounds=rounds, layers_per_round=layers_per_round, shuffle_stride=shuffle_stride, use_lwe=use_lwe, q=q)
+    encrypt_with_public_veinn(seed_input, message, numbers, vp, out_file, mode, bytes_per_number, nonce)
 
 def menu_decrypt_with_public_veinn():
     use_keystore = input("Use keystore for seed? (y/n): ").strip().lower() or "y"
@@ -934,102 +941,107 @@ def menu_decrypt_with_public_veinn():
     else:
         seed_input = input("Enter public seed string: ").strip()
     enc_file = input("Encrypted file to decrypt (default enc_pub_veinn.json): ").strip() or "enc_pub_veinn.json"
-    validity_window = int(input(f"Timestamp validity window in seconds (default { VeinnParams.valid }): ").strip() or VeinnParams.valid)
+    validity_window = int(input(f"Timestamp validity window in seconds (default {VeinnParams.valid}): ").strip() or VeinnParams.valid)
     if not os.path.exists(enc_file):
-        print("Encrypted file not found.")        
+        print("Encrypted file not found.")
+        return
     decrypt_with_public_veinn(seed_input, enc_file, validity_window)
+
+def veinn_from_seed(seed_input: str, vp: VeinnParams):
+    seed = seed_input.encode('utf-8')
+    k = key_from_seed(seed, vp)
+    print(f"Derived VEINN key with params: n={vp.n}, rounds={vp.rounds}, layers_per_round={vp.layers_per_round}, shuffle_stride={vp.shuffle_stride}, use_lwe={vp.use_lwe}, q={vp.q}")
+
+def validate_timestamp(timestamp: float, validity_window: int) -> bool:
+    current_time = time.time()
+    return abs(current_time - timestamp) <= validity_window
 
 def main():
     parser = argparse.ArgumentParser(description="VEINN CLI with Lattice-based INN")
     subparsers = parser.add_subparsers(dest="command")
 
-    # Subparser for homomorphic addition
     hom_add_parser = subparsers.add_parser("hom_add", help="Lattice-based homomorphic addition")
     hom_add_parser.add_argument("--file1", required=True, help="First encrypted file")
     hom_add_parser.add_argument("--file2", required=True, help="Second encrypted file")
     hom_add_parser.add_argument("--out_file", default="hom_add.json", help="Output file")
 
-    # Subparser for homomorphic multiplication
     hom_mul_parser = subparsers.add_parser("hom_mul", help="Lattice-based homomorphic multiplication")
     hom_mul_parser.add_argument("--file1", required=True, help="First encrypted file")
     hom_mul_parser.add_argument("--file2", required=True, help="Second encrypted file")
     hom_mul_parser.add_argument("--out_file", default="hom_mul.json", help="Output file")
 
-    # Subparser for creating keystore
     create_keystore_parser = subparsers.add_parser("create_keystore", help="Create encrypted keystore")
     create_keystore_parser.add_argument("--passphrase", required=True, help="Keystore passphrase")
     create_keystore_parser.add_argument("--keystore_file", default="keystore.json", help="Keystore filename")
 
-    # Subparser for generating RSA keypair
-    generate_rsa_parser = subparsers.add_parser("generate_rsa", help="Generate RSA keypair")
-    generate_rsa_parser.add_argument("--bits", type=int, default=2048, help="RSA key size in bits")
-    generate_rsa_parser.add_argument("--pubfile", default="rsa_pub.json", help="Public key filename")
-    generate_rsa_parser.add_argument("--privfile", default="rsa_priv.json", help="Private key filename")
-    generate_rsa_parser.add_argument("--keystore", default="keystore.json", help="Keystore filename for private key")
-    generate_rsa_parser.add_argument("--passphrase", help="Keystore passphrase")
-    generate_rsa_parser.add_argument("--key_name", help="Key name in keystore")
+    generate_kyber_parser = subparsers.add_parser("generate_kyber", help="Generate Kyber keypair")
+    generate_kyber_parser.add_argument("--pubfile", default="kyber_pub.json", help="Public key filename")
+    generate_kyber_parser.add_argument("--privfile", default="kyber_priv.json", help="Private key filename")
+    generate_kyber_parser.add_argument("--keystore", default="keystore.json", help="Keystore filename")
+    generate_kyber_parser.add_argument("--passphrase", help="Keystore passphrase")
+    generate_kyber_parser.add_argument("--key_name", help="Key name in keystore")
 
-    # Subparser for public encryption
-    public_encrypt_parser = subparsers.add_parser("public_encrypt", help="Encrypt with public key (RSA + VEINN)")
-    public_encrypt_parser.add_argument("--pubfile", default="rsa_pub.json", help="RSA public key file")
+    public_encrypt_parser = subparsers.add_parser("public_encrypt", help="Encrypt with Kyber public key")
+    public_encrypt_parser.add_argument("--pubfile", default="kyber_pub.json", help="Kyber public key file")
     public_encrypt_parser.add_argument("--in_path", help="Input file path")
     public_encrypt_parser.add_argument("--mode", choices=["t", "n"], default="t", help="Input mode")
-    public_encrypt_parser.add_argument("--n", type=int, default=VeinnParams.n, help="Number of uint16 words per block")
-    public_encrypt_parser.add_argument("--rounds", type=int, default=VeinnParams.rounds, help="Number of rounds")
-    public_encrypt_parser.add_argument("--layers_per_round", type=int, default=VeinnParams.layers_per_round, help="Layers per round")
-    public_encrypt_parser.add_argument("--shuffle_stride", type=int, default=VeinnParams.shuffle_stride, help="Shuffle stride")
-    public_encrypt_parser.add_argument("--use_lwe", type=bool, default=True, help="Use LWE PRF")
-    public_encrypt_parser.add_argument("--seed_len", type=int, default=32, help="Seed length")
+    public_encrypt_parser.add_argument("--n", type=int, default=VeinnParams.n)
+    public_encrypt_parser.add_argument("--rounds", type=int, default=VeinnParams.rounds)
+    public_encrypt_parser.add_argument("--layers_per_round", type=int, default=VeinnParams.layers_per_round)
+    public_encrypt_parser.add_argument("--shuffle_stride", type=int, default=VeinnParams.shuffle_stride)
+    public_encrypt_parser.add_argument("--use_lwe", type=bool, default=True)
+    public_encrypt_parser.add_argument("--q", type=int, default=Q)
+    public_encrypt_parser.add_argument("--seed_len", type=int, default=32)
     public_encrypt_parser.add_argument("--nonce", help="Custom nonce (base64)")
-    public_encrypt_parser.add_argument("--out_file", default="enc_pub.json", help="Output encrypted file")
+    public_encrypt_parser.add_argument("--out_file", default="enc_pub.json")
 
-    # Subparser for decryption
-    public_decrypt_parser = subparsers.add_parser("public_decrypt", help="Decrypt with private key")
-    public_decrypt_parser.add_argument("--keystore", default="keystore.json", help="Keystore filename")
-    public_decrypt_parser.add_argument("--privfile", default="rsa_priv.json", help="Private key file")
-    public_decrypt_parser.add_argument("--encfile", default="enc_pub.json", help="Encrypted file")
-    public_decrypt_parser.add_argument("--passphrase", help="Keystore passphrase")
-    public_decrypt_parser.add_argument("--key_name", help="Key name in keystore")
-    public_decrypt_parser.add_argument("--validity_window", type=int, default=3600, help="Timestamp validity window (seconds)")
+    public_decrypt_parser = subparsers.add_parser("public_decrypt", help="Decrypt with Kyber private key")
+    public_decrypt_parser.add_argument("--keystore", default="keystore.json")
+    public_decrypt_parser.add_argument("--privfile", default="kyber_priv.json")
+    public_decrypt_parser.add_argument("--encfile", default="enc_pub.json")
+    public_decrypt_parser.add_argument("--passphrase")
+    public_decrypt_parser.add_argument("--key_name")
+    public_decrypt_parser.add_argument("--validity_window", type=int, default=3600)
 
-    # Subparser for public VEINN derivation
     public_veinn_parser = subparsers.add_parser("public_veinn", help="Derive public VEINN from seed")
-    public_veinn_parser.add_argument("--seed", required=True, help="Seed string")
-    public_veinn_parser.add_argument("--n", type=int, default=8, help="Number of uint16 words per block")
-    public_veinn_parser.add_argument("--rounds", type=int, default=3, help="Number of rounds")
-    public_veinn_parser.add_argument("--layers_per_round", type=int, default=2, help="Layers per round")
-    public_veinn_parser.add_argument("--shuffle_stride", type=int, default=7, help="Shuffle stride")
-    public_veinn_parser.add_argument("--use_lwe", type=bool, default=True, help="Use LWE PRF")
+    public_veinn_parser.add_argument("--seed", required=True)
+    public_veinn_parser.add_argument("--n", type=int, default=VeinnParams.n)
+    public_veinn_parser.add_argument("--rounds", type=int, default=VeinnParams.rounds)
+    public_veinn_parser.add_argument("--layers_per_round", type=int, default=VeinnParams.layers_per_round)
+    public_veinn_parser.add_argument("--shuffle_stride", type=int, default=VeinnParams.shuffle_stride)
+    public_veinn_parser.add_argument("--use_lwe", type=bool, default=True)
+    public_veinn_parser.add_argument("--q", type=int, default=Q)
 
     args = parser.parse_known_args()[0]
 
     try:
         match args.command:
             case "hom_add":
-                homomorphic_add_files(args.file1, args.file2, args.out_file)        
+                homomorphic_add_files(args.file1, args.file2, args.out_file)
             case "hom_mul":
                 homomorphic_mul_files(args.file1, args.file2, args.out_file)
             case "create_keystore":
                 create_keystore(args.passphrase, args.keystore_file)
                 print(f"Keystore created: {args.keystore_file}")
-            case "generate_rsa":
-                keypair = generate_rsa_keypair(args.bits)
+            case "generate_kyber":
+                keypair = generate_kyber_keypair()
                 with open(args.pubfile, "w") as f:
-                    json.dump({"n": keypair["n"], "e": keypair["e"]}, f)
+                    json.dump({"ek": keypair["ek"]}, f)
                 if args.keystore and args.passphrase and args.key_name:
                     store_key_in_keystore(args.passphrase, args.key_name, keypair, args.keystore)
-                    print(f"RSA keys generated: {args.pubfile} (public), private stored in keystore")
+                    print(f"Kyber keys generated: {args.pubfile} (public), private stored in keystore")
                 else:
                     with open(args.privfile, "w") as f:
                         json.dump(keypair, f)
-                    print(f"RSA keys generated: {args.pubfile} (public), {args.privfile} (private)")
+                    print(f"Kyber keys generated: {args.pubfile} (public), {args.privfile} (private)")
             case "public_encrypt":
                 vp = VeinnParams(
                     n=args.n,
                     rounds=args.rounds,
                     layers_per_round=args.layers_per_round,
                     shuffle_stride=args.shuffle_stride,
-                    use_lwe=args.use_lwe
+                    use_lwe=args.use_lwe,
+                    q=args.q
                 )
                 nonce = b64decode(args.nonce) if args.nonce else None
                 encrypt_with_pub(
@@ -1056,27 +1068,27 @@ def main():
                     rounds=args.rounds,
                     layers_per_round=args.layers_per_round,
                     shuffle_stride=args.shuffle_stride,
-                    use_lwe=args.use_lwe
+                    use_lwe=args.use_lwe,
+                    q=args.q
                 )
                 veinn_from_seed(args.seed, vp)
-            case _:                
-                _=os.system("cls") | os.system("clear")        
+            case _:
+                _=os.system("cls") | os.system("clear")
                 while True:
-                    print(f"{bcolors.OKCYAN}VEINN CLI — Lattice-based INN with LWE-based Key Nonlinearity{bcolors.ENDC}")
-                    print(f"{bcolors.OKCYAN}Nonlinearity via LWE PRF; linear INN for invertibility and homomorphism.{bcolors.ENDC}")
+                    print(f"{bcolors.WARNING}{bcolors.BOLD}VEINN - Vector Encrypted Invertible Neural Network{bcolors.ENDC}")
+                    print(f"{bcolors.GREY}{bcolors.BOLD}(]≡≡≡≡ø‡»{bcolors.OKCYAN}========================================-{bcolors.ENDC}")
                     print("")
                     print(f"{bcolors.BOLD}1){bcolors.ENDC} Create encrypted keystore")
-                    print(f"{bcolors.BOLD}2){bcolors.ENDC} Generate RSA keypair (public/private)")
-                    print(f"{bcolors.BOLD}3){bcolors.ENDC} Encrypt with recipient public key (RSA + VEINN)")
+                    print(f"{bcolors.BOLD}2){bcolors.ENDC} Generate Kyber keypair (public/private)")
+                    print(f"{bcolors.BOLD}3){bcolors.ENDC} Encrypt with recipient public key (Kyber + VEINN)")
                     print(f"{bcolors.BOLD}4){bcolors.ENDC} Decrypt with private key")
                     print(f"{bcolors.BOLD}5){bcolors.ENDC} Encrypt deterministically using public VEINN")
                     print(f"{bcolors.BOLD}6){bcolors.ENDC} Decrypt deterministically using public VEINN")
                     print(f"{bcolors.GREY}7) Lattice-based homomorphic add (file1, file2 -> out){bcolors.ENDC}")
                     print(f"{bcolors.GREY}8) Lattice-based homomorphic multiply (file1, file2 -> out){bcolors.ENDC}")
                     print(f"{bcolors.GREY}9) Derive public VEINN from seed{bcolors.ENDC}")
-
                     print(f"{bcolors.BOLD}0){bcolors.ENDC} Exit")
-                    choice = input(f"{bcolors.BOLD}Choice: {bcolors.ENDC}").strip()            
+                    choice = input(f"{bcolors.BOLD}Choice: {bcolors.ENDC}").strip()
                     try:
                         match choice:
                             case "0":
@@ -1084,7 +1096,7 @@ def main():
                             case "1":
                                 menu_generate_keystore()
                             case "2":
-                                menu_generate_rsa_keypair()
+                                menu_generate_kyber_keypair()
                             case "3":
                                 menu_encrypt_with_pub()
                             case "4":
@@ -1097,7 +1109,7 @@ def main():
                                 menu_homomorphic_add_files()
                             case "8":
                                 menu_homomorphic_mul_files()
-                            case "9":                        
+                            case "9":
                                 menu_veinn_from_seed()
                             case _:
                                 print("Invalid choice")
@@ -1108,5 +1120,6 @@ def main():
     except Exception as e:
         print(f"{bcolors.FAIL}ERROR:{bcolors.ENDC}", e)
         sys.exit(1)
+
 if __name__ == "__main__":
     main()
