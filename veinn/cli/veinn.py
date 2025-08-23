@@ -761,11 +761,11 @@ def decrypt_with_public_veinn(seed_input: str, enc_file: str, validity_window: i
 # Serialization Helpers
 # -----------------------------
 def write_ciphertext_json(path: str, encrypted_blocks: list, metadata: dict, enc_seed_bytes: bytes, hmac_value: str = None, nonce: bytes = None, timestamp: float = None):
-    encrypted = {
-        "encrypted": [[int(x) for x in blk.tolist()] for blk in encrypted_blocks]
+    key = {
+        "veinn_metadata": metadata        
     }
     payload = {
-        "veinn_metadata": metadata,
+        "encrypted": [[int(x) for x in blk.tolist()] for blk in encrypted_blocks],
         "enc_seed_b64": b64encode(enc_seed_bytes).decode()  # Kyber ciphertext as base64        
     }
     if hmac_value:
@@ -774,22 +774,22 @@ def write_ciphertext_json(path: str, encrypted_blocks: list, metadata: dict, enc
         payload["nonce_b64"] = b64encode(nonce).decode()  # Nonce as base64
     if timestamp:
         payload["timestamp"] = timestamp
-    with open("key_"+path, "w") as f:
-        json.dump(payload, f)
+    with open("key_"+key, "w") as f:
+        json.dump(key, f)
     with open(path, "w") as f:
-        json.dump(encrypted, f)
+        json.dump(payload, f)
 
 def read_ciphertext(path: str):
     with open("key_"+path, "r") as f:
         key = json.load(f)
     with open(path, "r") as f:
-        encrypted = json.load(f)
-    enc_seed = b64decode(key["enc_seed_b64"])  # Decode Kyber ciphertext
+        payload = json.load(f)
+    enc_seed = b64decode(payload["enc_seed_b64"])  # Decode Kyber ciphertext
     metadata = key["veinn_metadata"]
-    enc_blocks = [np.array([int(x) for x in blk], dtype=DTYPE) for blk in encrypted["encrypted"]]
-    hmac_value = key.get("hmac")
-    nonce = b64decode(key.get("nonce_b64", "")) if key.get("nonce_b64") else None  # Decode nonce
-    timestamp = key.get("timestamp")
+    enc_blocks = [np.array([int(x) for x in blk], dtype=DTYPE) for blk in payload["encrypted"]]
+    hmac_value = payload.get("hmac")
+    nonce = b64decode(payload.get("nonce_b64", "")) if payload.get("nonce_b64") else None  # Decode nonce
+    timestamp = payload.get("timestamp")
     return metadata, enc_seed, enc_blocks, hmac_value, nonce, timestamp
 
 # -----------------------------
