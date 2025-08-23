@@ -34,16 +34,16 @@ class bcolors:
 # -----------------------------
 # Core Parameters
 # -----------------------------
-Q = 65537 #2**32  # Modulus
+Q = 65537 #1152921504606877697  # Large prime ~2^60, ≡1 mod 512 for NTT
 DTYPE = np.int64
 
 @dataclass
 class VeinnParams:
-    n: int = 256  # Number of uint16 words per block (default 8 -> 16 bytes/block)
+    n: int = 256  # Number of int64 words per block
     rounds: int = 10
     layers_per_round: int = 10
     shuffle_stride: int = 11
-    use_lwe: bool = True  # LWE PRF for key nonlinearity and PQ security
+    use_lwe: bool = True
     valid: int = 3600
     seed_len: int = 32
 
@@ -85,108 +85,73 @@ def pkcs7_unpad(data: bytes) -> bytes:
     return data[:-padding_len]
 
 # -----------------------------
-# LWE-Based PRF
+# Ring Convolution with Iterative NTT
 # -----------------------------
 def ring_convolution(a, b, q, method="ntt"):
-    """
-    Ring convolution modulo q, drop-in replacement for your current method.
-
-    Args:
-        a, b : list[int] or np.ndarray
-            Polynomials represented as coefficient lists of length n
-        q : int
-            Modulus
-        method : str
-            "naive" → O(n^2), slow but exact
-            "fft"   → O(n log n), floating point FFT (fast, but rounding)
-            "ntt"   → O(n log n), modular NTT (exact if q supports)
-
-    Returns:
-        np.ndarray : coefficients of (a * b) mod (x^n+1, q)
-    """
     n = len(a)
-    a = np.array(a, dtype=np.int64) % q
-    b = np.array(b, dtype=np.int64) % q
+    a = np.array(a, dtype=DTYPE) % q
+    b = np.array(b, dtype=DTYPE) % q
     
     if method == "naive":
-        print("naive")
-        # direct polynomial multiplication
-        res = np.zeros(2*n, dtype=np.uint64)        
+        res = np.zeros(2*n, dtype=object)
         for i in range(n):
             for j in range(n):
-                res[i+j] += a[i] * b[j]
-        # wrap back into ring (mod x^n + 1)
+                res[i+j] = (res[i+j] + int(a[i]) * int(b[j])) % q
         res = (res[:n] - res[n:]) % q
-        return res
+        return res.astype(DTYPE)
 
     elif method == "fft":
-        # floating point FFT
         A = np.fft.fft(a, 2*n)
         B = np.fft.fft(b, 2*n)
         C = A * B
         res = np.fft.ifft(C).real.round().astype(int)
         res = (res[:n] - res[n:]) % q
-        return res
+        return res.astype(DTYPE)
 
     elif method == "ntt":
-        # Pad input arrays to length 2n
-        a_padded = np.zeros(2*n, dtype=np.int64)
+        a_padded = np.zeros(2*n, dtype=DTYPE)
         a_padded[:n] = a
-        b_padded = np.zeros(2*n, dtype=np.int64)
+        b_padded = np.zeros(2*n, dtype=DTYPE)
         b_padded[:n] = b
-
-        # find primitive 2n-th root of unity modulo q
-        g = find_primitive_root(q)
-        root = pow(g, (q - 1) // (2 * n), q)
-
-        # Forward NTT transform on padded arrays
-        A = ntt(a_padded, root, q)
-        B = ntt(b_padded, root, q)
-        
-        # Pointwise multiplication of transformed polynomials    
-        #C = [(x*y) % q for x, y in zip(A, B)]
-        C = (A * B) % q  # Use vectorized multiplication
-        
-        # Inverse NTT transform to get the result
-        res = intt(C, root, q)
-        
-        # Apply the ring reduction modulo (x^n + 1)
-        res = (np.array(res[:n]) - np.array(res[n:])) % q
-        return res
+        root = pow(find_primitive_root(q), (q - 1) // (2 * n), q)
+        A = iterative_ntt(a_padded, root, q)
+        B = iterative_ntt(b_padded, root, q)
+        C = mod_mul(A, B, q)
+        res = iterative_intt(C, root, q)
+        res = (res[:n] - res[n:]) % q
+        return res.astype(DTYPE)
 
     else:
         raise ValueError("method must be one of: naive, fft, ntt")
 
-# -----------------------------
-# Helper functions for NTT 
-# -----------------------------
-def ntt(a, root, q):
+def iterative_ntt(a: np.ndarray, root: int, q: int) -> np.ndarray:
     n = len(a)
-    if n == 1:
-        return a
+    a = a.copy()
+    t = n
+    m = 1
+    while m < n:
+        t //= 2
+        for i in range(m):
+            j1 = 2 * i * t
+            j2 = j1 + t - 1
+            S = pow(root, m + i, q)
+            for j in range(j1, j2 + 1):
+                U = a[j]
+                V = (a[j + t] * S) % q
+                a[j] = (U + V) % q
+                a[j + t] = (U - V) % q
+        m *= 2
+    return a
 
-    # Split the polynomial into even and odd coefficients
-    a_even = ntt(a[0::2], pow(root, 2, q), q)
-    a_odd = ntt(a[1::2], pow(root, 2, q), q)
-
-    T = np.zeros(n, dtype=np.int64)
-
-    for i in range(n // 2):
-        t = (a_odd[i] * pow(root, i, q)) % q
-        T[i] = (a_even[i] + t) % q
-        T[i + n // 2] = (a_even[i] - t) % q
-    
-    return T
-
-def intt(A, root, q):
+def iterative_intt(A: np.ndarray, root: int, q: int) -> np.ndarray:
     n = len(A)
-    # Calculate the inverse of the root for the inverse transform
-    root_inv = pow(root, -1, q)
-    # Perform the forward NTT on A with the inverse root
-    a = ntt(A, root_inv, q)
-    # Scale the result by the modular inverse of n
-    inv_n = pow(n, -1, q)
+    root_inv = pow(root, q-2, q)
+    a = iterative_ntt(A, root_inv, q)
+    inv_n = pow(n, q-2, q)
     return (a * inv_n) % q
+
+def mod_mul(a: np.ndarray, b: np.ndarray, q: int) -> np.ndarray:
+    return ((a.astype(object) * b.astype(object)) % q).astype(DTYPE)
 
 def find_primitive_root(q):
     """Finds a primitive root modulo q (very naive)."""
