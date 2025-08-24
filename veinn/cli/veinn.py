@@ -35,9 +35,6 @@ class bcolors:
 # -----------------------------
 # Core Parameters
 # -----------------------------
-Q = 65537 #1152921504606877697  # Large prime ~2^60, ≡1 mod 512 for NTT
-DTYPE = np.int64
-
 @dataclass
 class VeinnParams:
     n: int = 256  # Number of int64 words per block
@@ -47,7 +44,7 @@ class VeinnParams:
     use_lwe: bool = True
     valid: int = 3600
     seed_len: int = 32
-    q: int = Q
+    q: int = 1048577
 
 # -----------------------------
 # Utilities
@@ -64,12 +61,12 @@ def derive_u16(count: int, vp: VeinnParams, *chunks: bytes) -> np.ndarray:
         seed_derive = shake(32, *chunks)
         return lwe_prf_expand(seed_derive, count, vp)
     raw = shake(count * 2, *chunks)
-    return np.frombuffer(raw, dtype=DTYPE)[:count].copy()
+    return np.frombuffer(raw, dtype=np.int64)[:count].copy()
 
 def odd_constant_from_key(tag: bytes) -> int:
     x = int.from_bytes(shake(2, tag), 'little')
     x |= 1
-    return x & (Q - 1)
+    return x & (VeinnParams.q - 1)
 
 def pkcs7_pad(data: bytes, block_size: int) -> bytes:
     padding_len = block_size - (len(data) % block_size)
@@ -91,8 +88,8 @@ def pkcs7_unpad(data: bytes) -> bytes:
 # -----------------------------
 def ring_convolution(a, b, q, method="ntt"):
     n = len(a)
-    a = np.array(a, dtype=DTYPE) % q
-    b = np.array(b, dtype=DTYPE) % q
+    a = np.array(a, dtype=np.int64) % q
+    b = np.array(b, dtype=np.int64) % q
     
     if method == "naive":
         res = np.zeros(2*n, dtype=object)
@@ -100,7 +97,7 @@ def ring_convolution(a, b, q, method="ntt"):
             for j in range(n):
                 res[i+j] = (res[i+j] + int(a[i]) * int(b[j])) % q
         res = (res[:n] - res[n:]) % q
-        return res.astype(DTYPE)
+        return res.astype(np.int64)
 
     elif method == "fft":
         A = np.fft.fft(a, 2*n)
@@ -108,12 +105,12 @@ def ring_convolution(a, b, q, method="ntt"):
         C = A * B
         res = np.fft.ifft(C).real.round().astype(int)
         res = (res[:n] - res[n:]) % q
-        return res.astype(DTYPE)
+        return res.astype(np.int64)
 
     elif method == "ntt":
-        a_padded = np.zeros(2*n, dtype=DTYPE)
+        a_padded = np.zeros(2*n, dtype=np.int64)
         a_padded[:n] = a
-        b_padded = np.zeros(2*n, dtype=DTYPE)
+        b_padded = np.zeros(2*n, dtype=np.int64)
         b_padded[:n] = b
         root = pow(find_primitive_root(q), (q - 1) // (2 * n), q)
         A = iterative_ntt(a_padded, root, q)
@@ -121,7 +118,7 @@ def ring_convolution(a, b, q, method="ntt"):
         C = mod_mul(A, B, q)
         res = iterative_intt(C, root, q)
         res = (res[:n] - res[n:]) % q
-        return res.astype(DTYPE)
+        return res.astype(np.int64)
 
     else:
         raise ValueError("method must be one of: naive, fft, ntt")
@@ -153,7 +150,7 @@ def iterative_intt(A: np.ndarray, root: int, q: int) -> np.ndarray:
     return (a * inv_n) % q
 
 def mod_mul(a: np.ndarray, b: np.ndarray, q: int) -> np.ndarray:
-    return ((a.astype(object) * b.astype(object)) % q).astype(DTYPE)
+    return ((a.astype(object) * b.astype(object)) % q).astype(np.int64)
 
 def find_primitive_root(q):
     """Finds a primitive root modulo q (very naive)."""
@@ -184,16 +181,16 @@ def lwe_prf_expand(seed: bytes, out_n: int, vp: VeinnParams) -> np.ndarray:
     """Generate pseudorandom parameters with LWE noise, avoiding recursion."""
     n = vp.n
     # Use SHAKE-256 directly for s and a to prevent recursive calls
-    s = np.frombuffer(shake(n * 8, seed, b"s"), dtype=DTYPE)[:n] & (Q - 1)
-    a = np.frombuffer(shake(n * 8, seed, b"A"), dtype=DTYPE)[:n] & (Q - 1)
+    s = np.frombuffer(shake(n * 8, seed, b"s"), dtype=np.int64)[:n] & (vp.q - 1)
+    a = np.frombuffer(shake(n * 8, seed, b"A"), dtype=np.int64)[:n] & (vp.q - 1)
     raw = shake(n, seed, b"e")
     e = (np.frombuffer(raw, dtype=np.uint8)[:n] % 3).astype(np.int64)  # Small noise
     assert s.shape == (n,) and a.shape == (n,) and e.shape == (n,), f"LWE parameter shape mismatch{e.shape, a.shape, s.shape}"
-    b = ring_convolution(a, s, Q, 'ntt').astype(np.int64)
-    b = (b + e) % Q
-    out = np.zeros(out_n, dtype=DTYPE)
+    b = ring_convolution(a, s, vp.q, 'ntt').astype(np.int64)
+    b = (b + e) % vp.q
+    out = np.zeros(out_n, dtype=np.int64)
     for i in range(out_n):
-        out[i] = int(b[i % n]) & (Q - 1)
+        out[i] = int(b[i % n]) & (vp.q - 1)
     assert out.shape == (out_n,), f"Expected output shape {(out_n,)}, got {out.shape}"
     return out
 
@@ -212,13 +209,13 @@ def coupling_forward(x: np.ndarray, cp: CouplingParams) -> np.ndarray:
     assert cp.mask_a.shape == (h,) and cp.mask_b.shape == (h,), f"Mask shape mismatch: expected {(h,)}, got {cp.mask_a.shape}, {cp.mask_b.shape}"
     x1 = x[:h].copy()
     x2 = x[h:].copy()
-    t = (x2.astype(np.int64) + cp.mask_a.astype(np.int64)) % Q
-    t = ring_convolution(t, np.ones(h, dtype=DTYPE), Q, 'ntt')
-    x1 = (x1.astype(np.int64) + t) % Q
-    u = (x1.astype(np.int64) + cp.mask_b.astype(np.int64)) % Q
-    u = ring_convolution(u, np.ones(h, dtype=DTYPE), Q, 'ntt')
-    x2 = (x2.astype(np.int64) + u) % Q
-    return np.concatenate([x1.astype(DTYPE), x2.astype(DTYPE)])
+    t = (x2.astype(np.int64) + cp.mask_a.astype(np.int64)) % VeinnParams.q
+    t = ring_convolution(t, np.ones(h, dtype=np.int64), VeinnParams.q, 'ntt')
+    x1 = (x1.astype(np.int64) + t) % VeinnParams.q
+    u = (x1.astype(np.int64) + cp.mask_b.astype(np.int64)) % VeinnParams.q
+    u = ring_convolution(u, np.ones(h, dtype=np.int64), VeinnParams.q, 'ntt')
+    x2 = (x2.astype(np.int64) + u) % VeinnParams.q
+    return np.concatenate([x1.astype(np.int64), x2.astype(np.int64)])
 
 def coupling_inverse(x: np.ndarray, cp: CouplingParams) -> np.ndarray:
     n = x.shape[0]
@@ -227,13 +224,13 @@ def coupling_inverse(x: np.ndarray, cp: CouplingParams) -> np.ndarray:
     assert cp.mask_a.shape == (h,) and cp.mask_b.shape == (h,), f"Mask shape mismatch: expected {(h,)}, got {cp.mask_a.shape}, {cp.mask_b.shape}"
     x1 = x[:h].copy()
     x2 = x[h:].copy()
-    u = (x1.astype(np.int64) + cp.mask_b.astype(np.int64)) % Q
-    u = ring_convolution(u, np.ones(h, dtype=DTYPE), Q, 'ntt')
-    x2 = (x2.astype(np.int64) - u) % Q
-    t = (x2.astype(np.int64) + cp.mask_a.astype(np.int64)) % Q
-    t = ring_convolution(t, np.ones(h, dtype=DTYPE), Q, 'ntt')
-    x1 = (x1.astype(np.int64) - t) % Q
-    return np.concatenate([x1.astype(DTYPE), x2.astype(DTYPE)])
+    u = (x1.astype(np.int64) + cp.mask_b.astype(np.int64)) % VeinnParams.q
+    u = ring_convolution(u, np.ones(h, dtype=np.int64), VeinnParams.q, 'ntt')
+    x2 = (x2.astype(np.int64) - u) % VeinnParams.q
+    t = (x2.astype(np.int64) + cp.mask_a.astype(np.int64)) % VeinnParams.q
+    t = ring_convolution(t, np.ones(h, dtype=np.int64), VeinnParams.q, 'ntt')
+    x1 = (x1.astype(np.int64) - t) % VeinnParams.q
+    return np.concatenate([x1.astype(np.int64), x2.astype(np.int64)])
 
 # -----------------------------
 # Shuffle
@@ -245,13 +242,13 @@ def make_shuffle_indices(n: int, stride: int) -> np.ndarray:
 
 def shuffle(x: np.ndarray, idx: np.ndarray) -> np.ndarray:
     assert x.shape[0] == idx.shape[0], f"Shuffle shape mismatch: input {x.shape}, indices {idx.shape}"
-    return x[idx].astype(DTYPE)
+    return x[idx].astype(np.int64)
 
 def unshuffle(x: np.ndarray, idx: np.ndarray) -> np.ndarray:
     assert x.shape[0] == idx.shape[0], f"Unshuffle shape mismatch: input {x.shape}, indices {idx.shape}"
     inv = np.empty_like(idx)
     inv[idx] = np.arange(len(idx))
-    return x[inv].astype(DTYPE)
+    return x[inv].astype(np.int64)
 
 # -----------------------------
 # Round Params (updated: invertible scaling)
@@ -278,9 +275,9 @@ def modinv(a: int, m: int) -> int:
     return x % m
 
 def inv_vec_mod_q(arr: np.ndarray) -> np.ndarray:
-    out = np.zeros_like(arr, dtype=DTYPE)
+    out = np.zeros_like(arr, dtype=np.int64)
     for i, v in enumerate(arr.astype(int).tolist()):
-        out[i] = modinv(v, Q)
+        out[i] = modinv(v, VeinnParams.q)
     return out
 
 def ensure_coprime_to_q_vec(vec, q):
@@ -316,8 +313,8 @@ def key_from_seed(seed: bytes, vp: VeinnParams) -> VeinnKey:
         scale = derive_u16(n, vp, seed, b"ring", bytes([r]))
         # Convert to a signed integer type to prevent overflow
         scale = scale.astype(np.int64)
-        # Ensure all elements are coprime to Q
-        scale = ensure_coprime_to_q_vec(scale, Q)
+        # Ensure all elements are coprime to VeinnParams.q
+        scale = ensure_coprime_to_q_vec(scale, VeinnParams.q)
         scale_inv = inv_vec_mod_q(scale)
 
         assert scale.shape == (n,), f"Ring scale shape mismatch: expected {(n,)}, got {scale.shape}"
@@ -338,9 +335,9 @@ def permute_forward(x: np.ndarray, key: VeinnKey) -> np.ndarray:
         for cp in key.rounds[r].cpls:
             y = coupling_forward(y, cp)
         # Invertible elementwise scaling
-        y = (y.astype(np.int64) * key.rounds[r].ring_scale.astype(np.int64)) % Q
+        y = (y.astype(np.int64) * key.rounds[r].ring_scale.astype(np.int64)) % VeinnParams.q
         y = shuffle(y, idx)
-    return y.astype(DTYPE)
+    return y.astype(np.int64)
 
 def permute_inverse(x: np.ndarray, key: VeinnKey) -> np.ndarray:
     vp = key.params
@@ -350,10 +347,10 @@ def permute_inverse(x: np.ndarray, key: VeinnKey) -> np.ndarray:
     for r in reversed(range(vp.rounds)):
         y = unshuffle(y, idx)
         # Apply precomputed inverse scaling
-        y = (y.astype(np.int64) * key.rounds[r].ring_scale_inv.astype(np.int64)) % Q
+        y = (y.astype(np.int64) * key.rounds[r].ring_scale_inv.astype(np.int64)) % VeinnParams.q
         for cp in reversed(key.rounds[r].cpls):
             y = coupling_inverse(y, cp)
-    return y.astype(DTYPE)
+    return y.astype(np.int64)
 
 # -----------------------------
 # Block Helpers
@@ -361,7 +358,7 @@ def permute_inverse(x: np.ndarray, key: VeinnKey) -> np.ndarray:
 def bytes_to_block(b: bytes, n: int) -> np.ndarray:
     padded = b.ljust(2 * n, b'\x00')
     arr = np.frombuffer(padded, dtype='<u2')[:n].copy()
-    return arr.astype(DTYPE)
+    return arr.astype(np.int64)
 
 def block_to_bytes(x: np.ndarray) -> bytes:
     return x.astype('<u2').tobytes()
@@ -412,7 +409,7 @@ def homomorphic_add_files(f1: str, f2: str, out_file: str):
         raise ValueError(f"{bcolors.FAIL}Encrypted files metadata mismatch{bcolors.ENDC}")
     if len(enc1) != len(enc2):
         raise ValueError(f"{bcolors.FAIL}Encrypted files must have same number of blocks{bcolors.ENDC}")
-    summed = [(a + b) % Q for a, b in zip(enc1, enc2)]
+    summed = [(a + b) % VeinnParams.q for a, b in zip(enc1, enc2)]
     _write_encrypted_payload(out_file, summed, meta1)
     print(f"Lattice-based homomorphic sum saved to {out_file}")
 
@@ -423,7 +420,7 @@ def homomorphic_mul_files(f1: str, f2: str, out_file: str):
         raise ValueError(f"{bcolors.FAIL}Encrypted files metadata mismatch{bcolors.ENDC}")
     if len(enc1) != len(enc2):
         raise ValueError(f"{bcolors.FAIL}Encrypted files must have same number of blocks{bcolors.ENDC}")
-    prod = [ring_convolution(a, b, Q, 'ntt') for a, b in zip(enc1, enc2)]
+    prod = [ring_convolution(a, b, VeinnParams.q, 'ntt') for a, b in zip(enc1, enc2)]
     _write_encrypted_payload(out_file, prod, meta1)
     print(f"Lattice-based homomorphic product saved to {out_file}")
 
@@ -727,7 +724,7 @@ def read_ciphertext(path: str):
         encrypted = json.load(f)
     enc_seed = b64decode(encrypted["enc_seed_b64"])  # Decode Kyber ciphertext
     metadata = key["veinn_metadata"]
-    enc_blocks = [np.array([int(x) for x in blk], dtype=DTYPE) for blk in encrypted["encrypted"]]
+    enc_blocks = [np.array([int(x) for x in blk], dtype=np.int64) for blk in encrypted["encrypted"]]
     hmac_value = encrypted.get("hmac")
     nonce = b64decode(encrypted.get("nonce_b64", "")) if encrypted.get("nonce_b64") else None  # Decode nonce
     timestamp = encrypted.get("timestamp")
@@ -769,7 +766,7 @@ def menu_encrypt_with_pub():
         return
     inpath = input("Optional input file path (blank = prompt): ").strip() or None
     mode = input("Mode: (t)ext or (n)umeric? [t]: ").strip().lower() or "t"
-    n = int(input(f"Number of {DTYPE} words per block (default {VeinnParams.n}): ").strip() or VeinnParams.n)
+    n = int(input(f"Number of {np.int64} words per block (default {VeinnParams.n}): ").strip() or VeinnParams.n)
     rounds = int(input(f"Number of rounds (default {VeinnParams.rounds}): ").strip() or VeinnParams.rounds)
     layers_per_round = int(input(f"Layers per round (default {VeinnParams.layers_per_round}): ").strip() or VeinnParams.layers_per_round)
     shuffle_stride = int(input(f"Shuffle stride (default {VeinnParams.shuffle_stride}): ").strip() or VeinnParams.shuffle_stride)
@@ -778,7 +775,7 @@ def menu_encrypt_with_pub():
     seed_len = int(input(f"Seed length (default {VeinnParams.seed_len}): ").strip() or VeinnParams.seed_len)
     nonce_str = input("Custom nonce (base64, blank for random): ").strip() or None
     nonce = b64decode(nonce_str) if nonce_str else None
-    q = int(input(f"Modulus q (default {Q}): ").strip() or Q)
+    q = int(input(f"Modulus q (default {VeinnParams.q}): ").strip() or VeinnParams.q)
     vp = VeinnParams(n=n, rounds=rounds, layers_per_round=layers_per_round, shuffle_stride=shuffle_stride, use_lwe=use_lwe, q=q)
     message = None
     numbers = None
@@ -830,13 +827,13 @@ def menu_veinn_from_seed():
         seed_input = seed_data["seed"]
     else:
         seed_input = input("Enter seed string (publicly shared): ").strip()
-    n = int(input(f"Number of {DTYPE} words per block (default {VeinnParams.n}): ").strip() or VeinnParams.n)
+    n = int(input(f"Number of {np.int64} words per block (default {VeinnParams.n}): ").strip() or VeinnParams.n)
     rounds = int(input(f"Number of rounds (default {VeinnParams.rounds}): ").strip() or VeinnParams.rounds)
     layers_per_round = int(input(f"Layers per round (default {VeinnParams.layers_per_round}): ").strip() or VeinnParams.layers_per_round)
     shuffle_stride = int(input(f"Shuffle stride (default {VeinnParams.shuffle_stride}): ").strip() or VeinnParams.shuffle_stride)
     use_lwe = input("Use LWE PRF for key nonlinearity (y/n) [y]: ").strip().lower() or "y"
     use_lwe = use_lwe == "y"
-    q = int(input(f"Modulus q (default {Q}): ").strip() or Q)
+    q = int(input(f"Modulus q (default {VeinnParams.q}): ").strip() or VeinnParams.q)
     vp = VeinnParams(n=n, rounds=rounds, layers_per_round=layers_per_round, shuffle_stride=shuffle_stride, use_lwe=use_lwe, q=q)
     veinn_from_seed(seed_input, vp)
 
@@ -863,13 +860,13 @@ def menu_encrypt_with_public_veinn():
         raw_nums = [s for s in content.replace(",", " ").split() if s != ""]
         numbers = [int(x) for x in raw_nums]
         bytes_per_number = int(input("Bytes per number (default 8): ").strip() or 8)
-    n = int(input(f"Number of {DTYPE} words per block (default {VeinnParams.n}): ").strip() or VeinnParams.n)
+    n = int(input(f"Number of {np.int64} words per block (default {VeinnParams.n}): ").strip() or VeinnParams.n)
     rounds = int(input(f"Number of rounds (default {VeinnParams.rounds}): ").strip() or VeinnParams.rounds)
     layers_per_round = int(input(f"Layers per round (default {VeinnParams.layers_per_round}): ").strip() or VeinnParams.layers_per_round)
     shuffle_stride = int(input(f"Shuffle stride (default {VeinnParams.shuffle_stride}): ").strip() or VeinnParams.shuffle_stride)
     use_lwe = input("Use LWE PRF for key nonlinearity (y/n) [y]: ").strip().lower() or "y"
     use_lwe = use_lwe == "y"
-    q = int(input(f"Modulus q (default {Q}): ").strip() or Q)
+    q = int(input(f"Modulus q (default {VeinnParams.q}): ").strip() or VeinnParams.q)
     out_file = input("Output encrypted filename (default enc_pub_veinn.json): ").strip() or "enc_pub_veinn.json"
     nonce_str = input("Custom nonce (base64, blank for random): ").strip() or None
     nonce = b64decode(nonce_str) if nonce_str else None
@@ -937,7 +934,7 @@ def main():
     public_encrypt_parser.add_argument("--layers_per_round", type=int, default=VeinnParams.layers_per_round)
     public_encrypt_parser.add_argument("--shuffle_stride", type=int, default=VeinnParams.shuffle_stride)
     public_encrypt_parser.add_argument("--use_lwe", type=bool, default=True)
-    public_encrypt_parser.add_argument("--q", type=int, default=Q)
+    public_encrypt_parser.add_argument("--q", type=int, default=VeinnParams.q)
     public_encrypt_parser.add_argument("--seed_len", type=int, default=32)
     public_encrypt_parser.add_argument("--nonce", help="Custom nonce (base64)")
     public_encrypt_parser.add_argument("--out_file", default="enc_pub.json")
@@ -957,7 +954,7 @@ def main():
     public_veinn_parser.add_argument("--layers_per_round", type=int, default=VeinnParams.layers_per_round)
     public_veinn_parser.add_argument("--shuffle_stride", type=int, default=VeinnParams.shuffle_stride)
     public_veinn_parser.add_argument("--use_lwe", type=bool, default=True)
-    public_veinn_parser.add_argument("--q", type=int, default=Q)
+    public_veinn_parser.add_argument("--q", type=int, default=VeinnParams.q)
 
     args = parser.parse_known_args()[0]
 
