@@ -205,4 +205,7 @@ MIT License
 
 ### TODO
    - Integrate updates to command line and package.
-
+   - Implement to bin encrypt/decrypt as option instead of just JSON
+   - Implement point to file for option 5
+   - Extend length of acceptable encrypted text (option 5 limited). I mean this is really just a chunking fix. 
+   - Opine on the failures of bias in decision making trees. 
