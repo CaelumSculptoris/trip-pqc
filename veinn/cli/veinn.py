@@ -476,65 +476,6 @@ def retrieve_key_from_keystore(passphrase: str, key_name: str, keystore_file: st
     except Exception:
         raise ValueError(f"{bcolors.FAIL}Failed to decrypt key. Wrong passphrase?{bcolors.ENDC}")
 
-# -----------------------------
-# RSA Helpers
-# -----------------------------
-def is_probable_prime(n: int, trials: int = 5) -> bool:
-    if n < 2:
-        return False
-    if n == 2:
-        return True
-    if n % 2 == 0:
-        return False
-    s, d = 0, n - 1
-    while d % 2 == 0:
-        s += 1
-        d //= 2
-    for _ in range(trials):
-        a = secrets.randbelow(n - 3) + 2
-        x = pow(a, d, n)
-        if x == 1 or x == n - 1:
-            continue
-        for _ in range(s - 1):
-            x = (x * x) % n
-            if x == n - 1:
-                break
-        else:
-            return False
-    return True
-
-def gen_prime(bits: int) -> int:
-    while True:
-        p = secrets.randbits(bits)
-        p |= (1 << (bits - 1)) | 1
-        if is_probable_prime(p):
-            return p
-
-def egcd(a: int, b: int) -> tuple:
-    if a == 0:
-        return b, 0, 1
-    gcd, x1, y1 = egcd(b % a, a)
-    x = y1 - (b // a) * x1
-    y = x1
-    return gcd, x, y
-
-def modinv_int(a: int, m: int) -> int:
-    gcd, x, _ = egcd(a, m)
-    if gcd != 1:
-        raise ValueError(f"{bcolors.FAIL}Modular inverse does not exist{bcolors.ENDC}")
-    return x % m
-
-def generate_rsa_keypair(bits: int) -> dict:
-    p = gen_prime(bits // 2)
-    q = gen_prime(bits // 2)
-    n = p * q
-    phi = (p - 1) * (q - 1)
-    e = 65537
-    while math.gcd(e, phi) != 1:
-        e += 2
-    d = modinv_int(e, phi)
-    return {"n": n, "e": e, "d": d, "p": p, "q": q}
-
 def int_to_bytes_be(n: int) -> bytes:
     if n == 0:
         return b"\x00"
