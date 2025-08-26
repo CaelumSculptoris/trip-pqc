@@ -83,6 +83,54 @@ def pkcs7_unpad(data: bytes) -> bytes:
         raise ValueError(f"{bcolors.FAIL}Invalid padding{bcolors.ENDC}")
     return data[:-padding_len]
 
+def sbox_val(x, q: int):
+    # The S-box is now a simple, invertible function for any q
+    return (int(x) + 1) % q
+
+def inv_sbox_val(x, q: int):
+    # The inverse is simply subtraction
+    return (int(x) - 1 + q) % q
+
+# Primary S-box: modular inverse (0 -> 0). Clean, bijective if q is prime (or for units).
+def sbox_val_modinv(x, q: int):
+    x = int(x) % q  # force to plain int
+    if x == 0:
+        return 0
+    try:
+        return pow(x, -1, q)  # Python int only
+    except ValueError:
+        return None  # no modular inverse
+
+# Fallback S-box: exponentiation
+def sbox_val_pow(x, q: int, e: int = 3):
+    x = int(x) % q
+    if x == 0:
+        return 0
+    return pow(x, e, q)
+
+# Vectorized layers
+def sbox_layer(vec, q: int):
+    if isinstance(vec, np.ndarray):
+        out = np.empty_like(vec, dtype=np.int64)
+        it = np.nditer(vec, flags=['multi_index'])
+        while not it.finished:
+            out[it.multi_index] = sbox_val(int(it[0]), q)
+            it.iternext()
+        return out % q
+    else:
+        return [sbox_val(int(x), q) for x in vec]
+
+def inv_sbox_layer(vec, q: int):
+    if isinstance(vec, np.ndarray):
+        out = np.empty_like(vec, dtype=np.int64)
+        it = np.nditer(vec, flags=['multi_index'])
+        while not it.finished:
+            out[it.multi_index] = inv_sbox_val(int(it[0]), q)
+            it.iternext()
+        return out % q
+    else:
+        return [inv_sbox_val(int(x), q) for x in vec]
+
 # -----------------------------
 # Ring Convolution with Iterative NTT
 # -----------------------------
@@ -337,6 +385,7 @@ def permute_forward(x: np.ndarray, key: VeinnKey) -> np.ndarray:
             y = coupling_forward(y, cp)
         # Invertible elementwise scaling
         y = (y.astype(np.int64) * key.rounds[r].ring_scale.astype(np.int64)) % VeinnParams.q
+        y = np.array(sbox_layer(y, VeinnParams.q), dtype=np.int64)
         y = shuffle(y, idx)
     return y.astype(np.int64)
 
@@ -347,6 +396,7 @@ def permute_inverse(x: np.ndarray, key: VeinnKey) -> np.ndarray:
     y = x.copy()
     for r in reversed(range(vp.rounds)):
         y = unshuffle(y, idx)
+        y = np.array(inv_sbox_layer(y, VeinnParams.q), dtype=np.int64)
         # Apply precomputed inverse scaling
         y = (y.astype(np.int64) * key.rounds[r].ring_scale_inv.astype(np.int64)) % VeinnParams.q
         for cp in reversed(key.rounds[r].cpls):
