@@ -551,24 +551,18 @@ def veinn_from_seed(seed_input: str, vp: VeinnParams):
     k = key_from_seed(seed, vp)
     print(f"Derived VEINN key with params: n={vp.n}, rounds={vp.rounds}, layers_per_round={vp.layers_per_round}, shuffle_stride={vp.shuffle_stride}, use_lwe={vp.use_lwe}")
 
-def encrypt_with_pub(pubfile: str, message: Optional[str] = None, numbers: Optional[list] = None, in_path: Optional[str] = None, mode: str = "t", vp: VeinnParams = VeinnParams(), seed_len: int = 32, nonce: Optional[bytes] = None, out_file: str = "enc_pub.json") -> str:
+def encrypt_with_pub(pubfile: str, file_type: str, message: Optional[str] = None, in_path: Optional[str] = None, vp: VeinnParams = VeinnParams(), seed_len: int = 32, nonce: Optional[bytes] = None, out_file: str = "enc_pub") -> str:
     with open(pubfile, "r") as f:
         pub = json.load(f)
     ek = bytes(pub["ek"])
     if in_path:
         with open(in_path, "rb") as f:
             message_bytes = f.read()
-    elif mode == "t":
+    else:
         if not message:
             raise ValueError(f"{bcolors.FAIL}Message required for text mode{bcolors.ENDC}")
         message_bytes = message.encode('utf-8')
-    else:
-        if not numbers:
-            raise ValueError(f"{bcolors.FAIL}Numbers required for numeric mode{bcolors.ENDC}")
-        bytes_per_number = vp.n * 2
-        message_bytes = b""
-        for num in numbers:
-            message_bytes += num.to_bytes(bytes_per_number, 'big', signed=True)
+
     message_bytes = pkcs7_pad(message_bytes, vp.n * 2)
     nonce = nonce or secrets.token_bytes(16)
     ephemeral_seed, ct = ML_KEM_768.encaps(ek)
@@ -583,24 +577,24 @@ def encrypt_with_pub(pubfile: str, message: Optional[str] = None, numbers: Optio
         "layers_per_round": vp.layers_per_round,
         "shuffle_stride": vp.shuffle_stride,
         "use_lwe": vp.use_lwe,
-        "mode": mode,
         "bytes_per_number": vp.n * 2
     }
     timestamp = time.time()
     msg_for_hmac = ct + b"".join(block_to_bytes(b) for b in enc_blocks) + math.floor(timestamp).to_bytes(8, 'big')
     hmac_value = hmac.new(ephemeral_seed, msg_for_hmac, hashlib.sha256).hexdigest()
-    write_ciphertext_json(out_file, enc_blocks, metadata, ct, hmac_value, nonce, timestamp)
+    out_file = out_file + "." + file_type
+    write_ciphertext(out_file, file_type, enc_blocks, metadata, ct, hmac_value, nonce, timestamp)
     print(f"Encrypted to {out_file}")
     return out_file
 
-def decrypt_with_priv(keystore: Optional[str], privfile: Optional[str], encfile: str, passphrase: Optional[str], key_name: Optional[str], validity_window: int):
+def decrypt_with_priv(keystore: Optional[str], privfile: Optional[str], encfile: str, passphrase: Optional[str], key_name: Optional[str], file_type: str, validity_window: int):
     if keystore and passphrase and key_name:
         privkey = retrieve_key_from_keystore(passphrase, key_name, keystore)
     else:
         with open(privfile, "r") as f:
             privkey = json.load(f)
     dk = bytes(privkey["dk"])
-    metadata, enc_seed_bytes, enc_blocks, hmac_value, nonce, timestamp = read_ciphertext(encfile)
+    metadata, enc_seed_bytes, enc_blocks, hmac_value, nonce, timestamp = read_ciphertext(encfile, file_type)
     assert isinstance(enc_seed_bytes, bytes), "Encrypted seed must be bytes"
     if nonce is not None:
         assert isinstance(nonce, bytes), "Nonce must be bytes"
@@ -622,30 +616,20 @@ def decrypt_with_priv(keystore: Optional[str], privfile: Optional[str], encfile:
     dec_blocks = [permute_inverse(b, k) for b in enc_blocks]
     dec_bytes = b"".join(block_to_bytes(b) for b in dec_blocks)
     dec_bytes = pkcs7_unpad(dec_bytes)
-    mode = metadata.get("mode", "n")
-    if mode == "t":
-        print("Decrypted message:", dec_bytes.decode('utf-8'))
-    else:
-        bytes_per_number = metadata.get("bytes_per_number", vp.n * 2)
-        numbers = [int.from_bytes(dec_bytes[i:i + bytes_per_number], 'big', signed=True)
-                   for i in range(0, len(dec_bytes), bytes_per_number)]
-        print("Decrypted numbers:", numbers)
+    
+    print("Decrypted message:", dec_bytes.decode('utf-8'))    
 
-def encrypt_with_public_veinn(seed_input: str, message: Optional[str] = None, numbers: Optional[list] = None, vp: VeinnParams = VeinnParams(), out_file: str = "enc_pub_veinn.json", mode: str = "t", bytes_per_number: Optional[int] = None, nonce: Optional[bytes] = None) -> str:
+def encrypt_with_public_veinn(seed_input: str, file_type: str, message: Optional[str] = None, in_path: Optional[str] = None, vp: VeinnParams = VeinnParams(), out_file: str = "enc_pub_veinn.json", mode: str = "t", bytes_per_number: Optional[int] = None, nonce: Optional[bytes] = None) -> str:
     seed = seed_input.encode('utf-8')
     k = key_from_seed(seed, vp)
-    if message or mode == "t":
+    if in_path:
+        with open(in_path, "rb") as f:
+            message_bytes = f.read()
+    else:
         if not message:
             raise ValueError(f"{bcolors.FAIL}Message required for text mode{bcolors.ENDC}")
         message_bytes = message.encode('utf-8')
-    else:
-        if not numbers:
-            raise ValueError(f"{bcolors.FAIL}Numbers required for numeric mode{bcolors.ENDC}")
-        if not bytes_per_number:
-            bytes_per_number = vp.n * 2
-        message_bytes = b""
-        for num in numbers:
-            message_bytes += num.to_bytes(bytes_per_number, 'big', signed=True)
+            
     message_bytes = pkcs7_pad(message_bytes, vp.n * 2)
     nonce = nonce or secrets.token_bytes(16)
     blocks = [bytes_to_block(message_bytes[i:i + vp.n * 2], vp.n) for i in range(0, len(message_bytes), vp.n * 2)]
@@ -657,25 +641,25 @@ def encrypt_with_public_veinn(seed_input: str, message: Optional[str] = None, nu
         "rounds": vp.rounds,
         "layers_per_round": vp.layers_per_round,
         "shuffle_stride": vp.shuffle_stride,
-        "use_lwe": vp.use_lwe,
-        "mode": mode,
-        "bytes_per_number": bytes_per_number or vp.n * 2
+        "use_lwe": vp.use_lwe        
     }
     timestamp = time.time()
     msg_for_hmac = b"".join(block_to_bytes(b) for b in enc_blocks) + math.floor(timestamp).to_bytes(8, 'big')
     hmac_value = hmac.new(seed, msg_for_hmac, hashlib.sha256).hexdigest()
-    write_ciphertext_json(out_file, enc_blocks, metadata, b"", hmac_value, nonce, timestamp)
+    out_file = out_file + "." + file_type
+    write_ciphertext(out_file, file_type, enc_blocks, metadata, b"", hmac_value, nonce, timestamp)
     print(f"Encrypted to {out_file}")
     return out_file
 
-def decrypt_with_public_veinn(seed_input: str, enc_file: str, validity_window: int):
+def decrypt_with_public_veinn(seed_input: str, file_type: str, enc_file: str, validity_window: int):
     seed = seed_input.encode('utf-8')
-    metadata, _, enc_blocks, hmac_value, nonce, timestamp = read_ciphertext(enc_file)
+    metadata, _, enc_blocks, hmac_value, nonce, timestamp = read_ciphertext(enc_file, file_type)
     if not validate_timestamp(timestamp, validity_window):
         raise ValueError(f"{bcolors.FAIL}Timestamp outside validity window{bcolors.ENDC}")
     msg_for_hmac = b"".join(block_to_bytes(b) for b in enc_blocks) + math.floor(timestamp).to_bytes(8, 'big')
     if not hmac.compare_digest(hmac.new(seed, msg_for_hmac, hashlib.sha256).hexdigest(), hmac_value):
         raise ValueError(f"{bcolors.FAIL}HMAC verification failed{bcolors.ENDC}")
+    
     vp = VeinnParams(
         n=metadata["n"],
         rounds=metadata["rounds"],
@@ -683,52 +667,86 @@ def decrypt_with_public_veinn(seed_input: str, enc_file: str, validity_window: i
         shuffle_stride=metadata["shuffle_stride"],
         use_lwe=metadata["use_lwe"]
     )
+
     k = key_from_seed(seed, vp)
     dec_blocks = [permute_inverse(b, k) for b in enc_blocks]
     dec_bytes = b"".join(block_to_bytes(b) for b in dec_blocks)
     dec_bytes = pkcs7_unpad(dec_bytes)
-    mode = metadata.get("mode", "n")
-    if mode == "t":
-        print("Decrypted message:", dec_bytes.decode('utf-8'))
-    else:
-        bytes_per_number = metadata.get("bytes_per_number", vp.n * 2)
-        numbers = [int.from_bytes(dec_bytes[i:i + bytes_per_number], 'big', signed=True)
-                   for i in range(0, len(dec_bytes), bytes_per_number)]
-        print("Decrypted numbers:", numbers)
+    
+    print("Decrypted message:", dec_bytes.decode('utf-8'))    
 
 # -----------------------------
 # Serialization Helpers
 # -----------------------------
-def write_ciphertext_json(path: str, encrypted_blocks: list, metadata: dict, enc_seed_bytes: bytes, hmac_value: str = None, nonce: bytes = None, timestamp: float = None):
+def write_ciphertext(path: str, file_type: str, encrypted_blocks: list, metadata: dict, enc_seed_bytes: bytes, hmac_value: str = None, nonce: bytes = None, timestamp: float = None):
     key = {
-        "veinn_metadata": metadata        
-    }
-    payload = {
-        "encrypted": [[int(x) for x in blk.tolist()] for blk in encrypted_blocks],
-        "enc_seed_b64": b64encode(enc_seed_bytes).decode()  # Kyber ciphertext as base64        
+        "veinn_metadata": metadata,
+        "enc_seed_b64": b64encode(enc_seed_bytes).decode(),  # Kyber ciphertext as base64 
     }
     if hmac_value:
-        payload["hmac"] = hmac_value
+        key["hmac"] = hmac_value
     if nonce:
-        payload["nonce_b64"] = b64encode(nonce).decode()  # Nonce as base64
+        key["nonce_b64"] = b64encode(nonce).decode()  # Nonce as base64
     if timestamp:
-        payload["timestamp"] = timestamp
+        key["timestamp"] = timestamp
     with open("key_"+path, "w") as f:
         json.dump(key, f)
-    with open(path, "w") as f:
-        json.dump(payload, f)
 
-def read_ciphertext(path: str):
+    if file_type == "json":                
+        payload = {
+            "encrypted": [[int(x) for x in blk.tolist()] for blk in encrypted_blocks],                   
+        }
+        with open(path, "w") as f:
+            json.dump(payload, f)
+    elif file_type == "bin":
+        with open(path, "wb") as f:
+            # Magic number
+            f.write(b"VEINN")
+            
+            # Number of blocks
+            f.write(len(encrypted_blocks).to_bytes(4, 'big'))
+            
+            # Encrypted blocks (each block is n int64 values)
+            for blk in encrypted_blocks:
+                assert blk.dtype == np.int64, "Blocks must be int64 arrays"
+                f.write(blk.tobytes())
+
+def read_ciphertext(path: str, file_type: str):
     with open("key_"+path, "r") as f:
         key = json.load(f)
-    with open(path, "r") as f:
-        encrypted = json.load(f)
-    enc_seed = b64decode(encrypted["enc_seed_b64"])  # Decode Kyber ciphertext
-    metadata = key["veinn_metadata"]
-    enc_blocks = [np.array([int(x) for x in blk], dtype=np.int64) for blk in encrypted["encrypted"]]
-    hmac_value = encrypted.get("hmac")
-    nonce = b64decode(encrypted.get("nonce_b64", "")) if encrypted.get("nonce_b64") else None  # Decode nonce
-    timestamp = encrypted.get("timestamp")
+        hmac_value = key.get("hmac")
+        nonce = b64decode(key.get("nonce_b64", "")) if key.get("nonce_b64") else None  # Decode nonce
+        timestamp = key.get("timestamp")
+        enc_seed = b64decode(key["enc_seed_b64"])  # Decode Kyber ciphertext
+        metadata = key["veinn_metadata"]
+
+    if file_type == "json":
+        with open(path, "r") as f:
+            encrypted = json.load(f)
+        enc_blocks = [np.array([int(x) for x in blk], dtype=np.int64) for blk in encrypted["encrypted"]]
+
+    elif file_type == "bin":
+        
+        with open(path, "rb") as f:
+            # Check magic number
+            magic = f.read(5)
+            if magic != b"VEINN":
+                raise ValueError(f"{bcolors.FAIL}Invalid file format: not a VEINN8 binary file{bcolors.ENDC}")
+            
+            # Read number of blocks
+            num_blocks = int.from_bytes(f.read(4), 'big')
+            
+            # Read blocks
+            n = metadata["n"]
+            enc_blocks = []
+            for _ in range(num_blocks):
+                block_data = f.read(n * 8)  # Each int64 is 8 bytes
+                if len(block_data) != n * 8:
+                    raise ValueError(f"{bcolors.FAIL}Incomplete block data{bcolors.ENDC}")
+                block = np.frombuffer(block_data, dtype=np.int64)
+                assert block.shape == (n,), f"Block shape mismatch: expected {(n,)}, got {block.shape}"
+                enc_blocks.append(block)
+            
     return metadata, enc_seed, enc_blocks, hmac_value, nonce, timestamp
 
 # -----------------------------
@@ -762,11 +780,12 @@ def menu_generate_kyber_keypair():
 
 def menu_encrypt_with_pub():
     pubfile = input("Recipient Kyber public key file (default kyber_pub.json): ").strip() or "kyber_pub.json"
+    
     if not os.path.exists(pubfile):
         print("Public key not found. Generate Kyber keys first.")
         return
-    inpath = input("Optional input file path (blank = prompt): ").strip() or None
-    mode = input("Mode: (t)ext or (n)umeric? [t]: ").strip().lower() or "t"
+    inpath = input("Optional input file path (blank = prompt): ").strip() or None    
+    file_type = input("Output file type (JSON/BIN) [json] : ").strip() or "json"
     n = int(input(f"Number of {np.int64} words per block (default {VeinnParams.n}): ").strip() or VeinnParams.n)
     rounds = int(input(f"Number of rounds (default {VeinnParams.rounds}): ").strip() or VeinnParams.rounds)
     layers_per_round = int(input(f"Layers per round (default {VeinnParams.layers_per_round}): ").strip() or VeinnParams.layers_per_round)
@@ -778,16 +797,10 @@ def menu_encrypt_with_pub():
     nonce = b64decode(nonce_str) if nonce_str else None
     q = int(input(f"Modulus q (default {VeinnParams.q}): ").strip() or VeinnParams.q)
     vp = VeinnParams(n=n, rounds=rounds, layers_per_round=layers_per_round, shuffle_stride=shuffle_stride, use_lwe=use_lwe, q=q)
-    message = None
-    numbers = None
-    if inpath is None:
-        if mode == "t":
-            message = input("Message to encrypt: ")
-        else:
-            content = input("Enter numbers (comma or whitespace separated): ").strip()
-            raw_nums = [s for s in content.replace(",", " ").split() if s != ""]
-            numbers = [int(x) for x in raw_nums]
-    encrypt_with_pub(pubfile, message=message, numbers=numbers, in_path=inpath, mode=mode, vp=vp, seed_len=seed_len, nonce=nonce)
+    message = None    
+    if inpath is None:        
+        message = input("Message to encrypt: ")        
+    encrypt_with_pub(pubfile, file_type, message=message, in_path=inpath, vp=vp, seed_len=seed_len, nonce=nonce)
 
 def menu_decrypt_with_priv():
     use_keystore = input("Use keystore for private key? (y/n): ").strip().lower() or "y"
@@ -798,12 +811,14 @@ def menu_decrypt_with_priv():
         key_name = input("Key name in keystore: ")
     else:
         privfile = input("Kyber private key file (default kyber_priv.json): ").strip() or "kyber_priv.json"
-    encfile = input("Encrypted file to decrypt (default enc_pub.json): ").strip() or "enc_pub.json"
+    encfile = input("Encrypted file to decrypt (default enc_pub): ").strip() or "enc_pub"
+    file_type = input("Output file type (JSON/BIN) [json] : ").strip() or "json"
+    encfile = encfile + "." + file_type
     validity_window = int(input(f"Timestamp validity window in seconds (default {VeinnParams.valid}): ").strip() or VeinnParams.valid)
     if not os.path.exists(encfile):
         print("Encrypted file not found.")
         return
-    decrypt_with_priv(keystore, privfile, encfile, passphrase, key_name, validity_window)
+    decrypt_with_priv(keystore, privfile, encfile, passphrase, key_name, file_type, validity_window)
 
 def menu_homomorphic_add_files():
     f1 = input("Encrypted file 1: ").strip()
@@ -839,6 +854,7 @@ def menu_veinn_from_seed():
     veinn_from_seed(seed_input, vp)
 
 def menu_encrypt_with_public_veinn():
+    message = None    
     use_keystore = input("Use keystore for seed? (y/n): ").strip().lower() or "y"
     seed_input, keystore, passphrase, key_name = None, None, None, None
     if use_keystore == "y":
@@ -850,17 +866,10 @@ def menu_encrypt_with_public_veinn():
         seed_input = seed_data["seed"]
     else:
         seed_input = input("Enter public seed string: ").strip()
-    mode = input("Mode: (t)ext or (n)umeric? [t]: ").strip().lower() or "t"
-    message = None
-    numbers = None
-    bytes_per_number = None
-    if mode == "t":
-        message = input("Message to encrypt: ")
-    else:
-        content = input("Enter numbers (comma or whitespace separated): ").strip()
-        raw_nums = [s for s in content.replace(",", " ").split() if s != ""]
-        numbers = [int(x) for x in raw_nums]
-        bytes_per_number = int(input("Bytes per number (default 8): ").strip() or 8)
+    inpath = input("Optional input file path (blank = prompt): ").strip() or None 
+    if inpath == None:
+        message = input("Message to encrypt: ")    
+
     n = int(input(f"Number of {np.int64} words per block (default {VeinnParams.n}): ").strip() or VeinnParams.n)
     rounds = int(input(f"Number of rounds (default {VeinnParams.rounds}): ").strip() or VeinnParams.rounds)
     layers_per_round = int(input(f"Layers per round (default {VeinnParams.layers_per_round}): ").strip() or VeinnParams.layers_per_round)
@@ -868,11 +877,12 @@ def menu_encrypt_with_public_veinn():
     use_lwe = input("Use LWE PRF for key nonlinearity (y/n) [y]: ").strip().lower() or "y"
     use_lwe = use_lwe == "y"
     q = int(input(f"Modulus q (default {VeinnParams.q}): ").strip() or VeinnParams.q)
-    out_file = input("Output encrypted filename (default enc_pub_veinn.json): ").strip() or "enc_pub_veinn.json"
+    out_file = input("Output encrypted filename (default enc_pub_veinn): ").strip() or "enc_pub_veinn"      
+    file_type = input("Output file type (JSON/BIN) [json] : ").strip() or "json"
     nonce_str = input("Custom nonce (base64, blank for random): ").strip() or None
     nonce = b64decode(nonce_str) if nonce_str else None
     vp = VeinnParams(n=n, rounds=rounds, layers_per_round=layers_per_round, shuffle_stride=shuffle_stride, use_lwe=use_lwe, q=q)
-    encrypt_with_public_veinn(seed_input, message, numbers, vp, out_file, mode, bytes_per_number, nonce)
+    encrypt_with_public_veinn(seed_input, file_type, message, inpath, vp, out_file, nonce)
 
 def menu_decrypt_with_public_veinn():
     use_keystore = input("Use keystore for seed? (y/n): ").strip().lower() or "y"
@@ -885,12 +895,14 @@ def menu_decrypt_with_public_veinn():
         seed_input = seed_data["seed"]
     else:
         seed_input = input("Enter public seed string: ").strip()
-    enc_file = input("Encrypted file to decrypt (default enc_pub_veinn.json): ").strip() or "enc_pub_veinn.json"
+    enc_file = input("Encrypted file to decrypt (default enc_pub_veinn): ").strip() or "enc_pub_veinn"
+    file_type = input("Output file type (JSON/BIN) [json] : ").strip() or "json"
     validity_window = int(input(f"Timestamp validity window in seconds (default {VeinnParams.valid}): ").strip() or VeinnParams.valid)
+    enc_file = enc_file + "." + file_type
     if not os.path.exists(enc_file):
         print("Encrypted file not found.")
         return
-    decrypt_with_public_veinn(seed_input, enc_file, validity_window)
+    decrypt_with_public_veinn(seed_input, file_type, enc_file, validity_window)
 
 def veinn_from_seed(seed_input: str, vp: VeinnParams):
     seed = seed_input.encode('utf-8')
