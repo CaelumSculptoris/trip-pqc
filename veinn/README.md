@@ -201,11 +201,11 @@ MIT License
    - 25 YoE in software engineering, frontend frameworks specialist. Zero YoE Python/Cryptography. Please dont judge me too strongly, I know the code looks like garbage. Primarily trying to get a working and stable PoC before I refactor the code and abstract the VEINN primitive out as an importable class. If you'd like to help clean up some of my code, create a pull request.
 
 ### Updates
-   - Kyber crystals, cause i'm a Jedi.
-
-### TODO
-   - Integrate updates to command line and package.
    - Implement to bin encrypt/decrypt as option instead of just JSON
    - Implement point to file for option 5
    - Extend length of acceptable encrypted text (option 5 limited). I mean this is really just a chunking fix. 
    - Opine on the failures of bias in decision trees. 
+
+### TODO
+   - Integrate updates to command line and package.
+
