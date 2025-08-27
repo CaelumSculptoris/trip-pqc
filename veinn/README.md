@@ -207,5 +207,7 @@ MIT License
    - Opine on the failures of bias in decision trees. 
 
 ### TODO
-   - Integrate updates to command line and package.
+   - Integrate updates to command line and package.   
+   - Losing \x80 when padding 16bit unsigned int to 32bit unsigned int.. so I'm trying to figure out whats going on with the padding... which is actually tangential to the fundamental premise of Lattice/INN cipher blocks and I could totally move on from the toy model... but I'm stubborn and I wanna see it work e2e as a proof.
+   - SBox should be improved for true nonlinearity. Predicated on the larger dtype... i think. 
 
