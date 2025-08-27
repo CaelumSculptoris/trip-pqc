@@ -201,7 +201,7 @@ MIT License
    - 25 YoE in software engineering, frontend frameworks specialist. Zero YoE Python/Cryptography. Please dont judge me too strongly, I know the code looks like garbage. Primarily trying to get a working and stable PoC before I refactor the code and abstract the VEINN primitive out as an importable class. If you'd like to help clean up some of my code, create a pull request.
 
 ### Updates
-   - Food for thought: You're faced with an unconventional problem that conventional tools aren't going to solve, and any solution outside of the standard tool set is going to sound like magical thinking... but sometimes that's what it takes - a little magic. So here we are trying to solve hard problems that conventional tools can't and it all seems a bit alien.
+   - Added a rough primitive.py as a conceptual example.
 
 ### TODO
    - Integrate updates to command line and package.   
