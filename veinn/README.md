@@ -201,13 +201,9 @@ MIT License
    - 25 YoE in software engineering, frontend frameworks specialist. Zero YoE Python/Cryptography. Please dont judge me too strongly, I know the code looks like garbage. Primarily trying to get a working and stable PoC before I refactor the code and abstract the VEINN primitive out as an importable class. If you'd like to help clean up some of my code, create a pull request.
 
 ### Updates
-   - Implement to bin encrypt/decrypt as option instead of just JSON
-   - Implement point to file for option 5
-   - Extend length of acceptable encrypted text (option 5 limited). I mean this is really just a chunking fix. 
-   - Opine on the failures of bias in decision trees. 
+   - Food for thought: You're faced with an unconventional problem that conventional tools aren't going to solve, and any solution outside of the standard tool set is going to sound like magical thinking... but sometimes that's what it takes - a little magic. So here we are trying to solve hard problems that conventional tools can't and it all seems a bit alien.
 
 ### TODO
    - Integrate updates to command line and package.   
    - Losing \x80 when padding 16bit unsigned int to 32bit unsigned int.. so I'm trying to figure out whats going on with the padding... which is actually tangential to the fundamental premise of Lattice/INN cipher blocks and I could totally move on from the toy model... but I'm stubborn and I wanna see it work e2e as a proof.
-   - SBox should be improved for true nonlinearity. Predicated on the larger dtype... i think. 
-
+   - SBox should be improved for true nonlinearity. Predicated on the larger dtype... i think.    
