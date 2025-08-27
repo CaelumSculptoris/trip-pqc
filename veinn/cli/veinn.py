@@ -37,14 +37,14 @@ class bcolors:
 # -----------------------------
 @dataclass
 class VeinnParams:
-    n: int = 256  # Number of int64 words per block
+    n: int = 512  # Number of int64 words per block
     rounds: int = 10
     layers_per_round: int = 10
     shuffle_stride: int = 11
     use_lwe: bool = True
     valid: int = 3600
     seed_len: int = 32
-    q: int = 1048577
+    q: int = 1049089 #1048577
 
 # -----------------------------
 # Utilities
@@ -69,23 +69,42 @@ def odd_constant_from_key(tag: bytes) -> int:
     return x & (VeinnParams.q - 1)
 
 def pkcs7_pad(data: bytes, block_size: int) -> bytes:
-    padding_len = block_size - (len(data) % block_size)
-    padding = bytes([padding_len] * padding_len)
+    # For large block sizes (>255), PKCS#7 byte cannot represent padding length.
+    # Use ISO/IEC 7816-4 style padding: 0x80 followed by zeros.
+    # if block_size <= 255:
+    #     padding_len = block_size - (len(data) % block_size)
+    #     padding = bytes([padding_len] * padding_len)
+    #     return data + padding
+    # ISO/IEC 7816-4
+    pad_len = block_size - (len(data) % block_size)
+    if pad_len == 0:
+        pad_len = block_size
+    padding = b'\x80' + b'\x00' * (pad_len - 1)    
     return data + padding
 
 def pkcs7_unpad(data: bytes) -> bytes:
+    # Support both PKCS#7 and ISO/IEC 7816-4 unpadding.
     if not data:
-        raise ValueError(f"{bcolors.FAIL}Cannot unpad empty data{bcolors.ENDC}")
-    padding_len = data[-1]
-    if padding_len == 0 or padding_len > len(data):
-        raise ValueError(f"{bcolors.FAIL}Invalid padding{bcolors.ENDC}")
-    if not all(b == padding_len for b in data[-padding_len:]):
-        raise ValueError(f"{bcolors.FAIL}Invalid padding{bcolors.ENDC}")
-    return data[:-padding_len]
+        raise ValueError("Cannot unpad empty data")
+    # Try PKCS#7 first if last byte appears reasonable
+    # padding_len = data[-1]
+    # if 1 <= padding_len <= 255 and padding_len <= len(data) and all(b == padding_len for b in data[-padding_len:]):
+    #     return data[:-padding_len]
+    # Otherwise try ISO/IEC 7816-4: find the last 0x80 byte
+    idx = data.rfind(b'\x80')
+    if idx == -1:
+        raise ValueError("Invalid padding")
+    if not all(b == 0 for b in data[idx+1:]):
+        raise ValueError("Invalid padding")
+    return data[:idx]
 
 def sbox_val(x, q: int):
     # The S-box is now a simple, invertible function for any q
-    return (int(x) + 1) % q
+    return (int(x) + 1) % q    
+    # x = int(x) % q
+    # if x == 0:
+    #     return 0
+    # return pow(x, -1, q)   # works for prime q
 
 def inv_sbox_val(x, q: int):
     # The inverse is simply subtraction
@@ -232,8 +251,8 @@ def lwe_prf_expand(seed: bytes, out_n: int, vp: VeinnParams) -> np.ndarray:
     s = np.frombuffer(shake(n * 8, seed, b"s"), dtype=np.int64)[:n] & (vp.q - 1)
     a = np.frombuffer(shake(n * 8, seed, b"A"), dtype=np.int64)[:n] & (vp.q - 1)
     raw = shake(n, seed, b"e")
-    #e = (np.frombuffer(raw, dtype=np.uint8)[:n] % 3).astype(np.int64)  # Small noise
-    e = np.random.randint(-8, 9, n, dtype=np.int64) % vp.q # Discrete uniform noise
+    e = np.frombuffer(raw, dtype=np.uint8)[:n].astype(np.int64)
+    e = ((e % 9) - 4).astype(np.int64) % vp.q
     assert s.shape == (n,) and a.shape == (n,) and e.shape == (n,), f"LWE parameter shape mismatch{e.shape, a.shape, s.shape}"
     b = ring_convolution(a, s, vp.q, 'ntt').astype(np.int64)
     b = (b + e) % vp.q
@@ -408,7 +427,7 @@ def permute_inverse(x: np.ndarray, key: VeinnKey) -> np.ndarray:
 # -----------------------------
 def bytes_to_block(b: bytes, n: int) -> np.ndarray:
     padded = b.ljust(2 * n, b'\x00')
-    arr = np.frombuffer(padded, dtype='<u2')[:n].copy()
+    arr = np.frombuffer(padded, dtype='<u2')[:n].copy()    
     return arr.astype(np.int64)
 
 def block_to_bytes(x: np.ndarray) -> bytes:
@@ -634,7 +653,6 @@ def encrypt_with_pub(pubfile: str, file_type: str, message: Optional[str] = None
     hmac_value = hmac.new(ephemeral_seed, msg_for_hmac, hashlib.sha256).hexdigest()
     out_file = out_file + "." + file_type
     write_ciphertext(out_file, file_type, enc_blocks, metadata, ct, hmac_value, nonce, timestamp)
-    print(f"Encrypted to {out_file}")
     return out_file
 
 def decrypt_with_priv(keystore: Optional[str], privfile: Optional[str], encfile: str, passphrase: Optional[str], key_name: Optional[str], file_type: str, validity_window: int):
