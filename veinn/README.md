@@ -209,4 +209,4 @@ MIT License
 ### TODO
    - Integrate updates to command line and package.   
    - NTRU.
-   - Public key derived parameters... maybe. Considerating Asymmerty.
+   - Public key derived parameters... maybe. Considerating Asymmetry.
