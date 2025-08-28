@@ -80,18 +80,6 @@ def unpad_iso7816(padded: bytes) -> bytes:
         raise ValueError("Invalid padding")
     return padded[:i]
 
-def sbox_val(x, q: int):
-    # The S-box is now a simple, invertible function for any q
-    return (int(x) + 1) % q    
-    # x = int(x) % q
-    # if x == 0:
-    #     return 0
-    # return pow(x, -1, q)   # works for prime q
-
-def inv_sbox_val(x, q: int):
-    # The inverse is simply subtraction
-    return (int(x) - 1 + q) % q
-
 # Primary S-box: modular inverse (0 -> 0). Clean, bijective if q is prime (or for units).
 def sbox_val_modinv(x, q: int):
     x = int(x) % q  # force to plain int
@@ -109,28 +97,44 @@ def sbox_val_pow(x, q: int, e: int = 3):
         return 0
     return pow(x, e, q)
 
-# Vectorized layers
-def sbox_layer(vec, q: int):
-    if isinstance(vec, np.ndarray):
-        out = np.empty_like(vec, dtype=np.int64)
-        it = np.nditer(vec, flags=['multi_index'])
-        while not it.finished:
-            out[it.multi_index] = sbox_val(int(it[0]), q)
-            it.iternext()
-        return out % q
-    else:
-        return [sbox_val(int(x), q) for x in vec]
+# Wrapper: try modinv, otherwise fallback
+def sbox_val(x, q: int, fallback_e: int = 3):
+    v = sbox_val_modinv(x, q)
+    if v is not None:
+        return v
+    return sbox_val_pow(x, q, fallback_e)
 
-def inv_sbox_layer(vec, q: int):
+# Vectorized layer
+def sbox_layer(vec, q: int, fallback_e: int = 3):
     if isinstance(vec, np.ndarray):
         out = np.empty_like(vec, dtype=np.int64)
         it = np.nditer(vec, flags=['multi_index'])
         while not it.finished:
-            out[it.multi_index] = inv_sbox_val(int(it[0]), q)
+            out[it.multi_index] = sbox_val(int(it[0]), q, fallback_e)
             it.iternext()
         return out % q
     else:
-        return [inv_sbox_val(int(x), q) for x in vec]
+        return [sbox_val(int(x), q, fallback_e) for x in vec]
+
+# Inverse S-box
+def inv_sbox_val(x, q: int, fallback_e: int = 3):
+    x = int(x) % q
+    try:
+        return sbox_val_modinv(x, q) or sbox_val_pow(x, q, fallback_e)
+    except Exception:
+        return sbox_val_pow(x, q, fallback_e)
+
+def inv_sbox_layer(vec, q: int, fallback_e: int = 3):
+    if isinstance(vec, np.ndarray):
+        out = np.empty_like(vec, dtype=np.int64)
+        it = np.nditer(vec, flags=['multi_index'])
+        while not it.finished:
+            out[it.multi_index] = inv_sbox_val(int(it[0]), q, fallback_e)
+            it.iternext()
+        return out % q
+    else:
+        return [inv_sbox_val(int(x), q, fallback_e) for x in vec]
+
 
 # -----------------------------
 # Ring Convolution with Iterative NTT
