@@ -68,35 +68,17 @@ def odd_constant_from_key(tag: bytes) -> int:
     x |= 1
     return x & (VeinnParams.q - 1)
 
-def pkcs7_pad(data: bytes, block_size: int) -> bytes:
-    # For large block sizes (>255), PKCS#7 byte cannot represent padding length.
-    # Use ISO/IEC 7816-4 style padding: 0x80 followed by zeros.
-    # if block_size <= 255:
-    #     padding_len = block_size - (len(data) % block_size)
-    #     padding = bytes([padding_len] * padding_len)
-    #     return data + padding
-    # ISO/IEC 7816-4
-    pad_len = block_size - (len(data) % block_size)
-    if pad_len == 0:
-        pad_len = block_size
-    padding = b'\x80' + b'\x00' * (pad_len - 1)    
-    return data + padding
+def pad_iso7816(data: bytes, blocksize: int) -> bytes:
+    padlen = (-len(data)) % blocksize
+    if padlen == 0:
+        padlen = blocksize
+    return data + b"\x80" + b"\x00"*(padlen-1)
 
-def pkcs7_unpad(data: bytes) -> bytes:
-    # Support both PKCS#7 and ISO/IEC 7816-4 unpadding.
-    if not data:
-        raise ValueError("Cannot unpad empty data")
-    # Try PKCS#7 first if last byte appears reasonable
-    # padding_len = data[-1]
-    # if 1 <= padding_len <= 255 and padding_len <= len(data) and all(b == padding_len for b in data[-padding_len:]):
-    #     return data[:-padding_len]
-    # Otherwise try ISO/IEC 7816-4: find the last 0x80 byte
-    idx = data.rfind(b'\x80')
-    if idx == -1:
+def unpad_iso7816(padded: bytes) -> bytes:
+    i = padded.rfind(b"\x80")
+    if i == -1 or any(b != 0 for b in padded[i+1:]):
         raise ValueError("Invalid padding")
-    if not all(b == 0 for b in data[idx+1:]):
-        raise ValueError("Invalid padding")
-    return data[:idx]
+    return padded[:i]
 
 def sbox_val(x, q: int):
     # The S-box is now a simple, invertible function for any q
@@ -166,14 +148,6 @@ def ring_convolution(a, b, q, method="ntt"):
         res = (res[:n] - res[n:]) % q
         return res.astype(np.int64)
 
-    elif method == "fft":
-        A = np.fft.fft(a, 2*n)
-        B = np.fft.fft(b, 2*n)
-        C = A * B
-        res = np.fft.ifft(C).real.round().astype(int)
-        res = (res[:n] - res[n:]) % q
-        return res.astype(np.int64)
-
     elif method == "ntt":
         a_padded = np.zeros(2*n, dtype=np.int64)
         a_padded[:n] = a
@@ -188,7 +162,7 @@ def ring_convolution(a, b, q, method="ntt"):
         return res.astype(np.int64)
 
     else:
-        raise ValueError("method must be one of: naive, fft, ntt")
+        raise ValueError("method must be one of: naive, ntt")
 
 def iterative_ntt(a: np.ndarray, root: int, q: int) -> np.ndarray:
     n = len(a)
@@ -270,34 +244,34 @@ class CouplingParams:
     mask_a: np.ndarray
     mask_b: np.ndarray
 
-def coupling_forward(x: np.ndarray, cp: CouplingParams) -> np.ndarray:
+def coupling_forward(x: np.ndarray, cp: CouplingParams, key: VeinnParams) -> np.ndarray:
     n = x.shape[0]
     h = n // 2
     assert x.shape == (n,), f"Expected input shape {(n,)}, got {x.shape}"
     assert cp.mask_a.shape == (h,) and cp.mask_b.shape == (h,), f"Mask shape mismatch: expected {(h,)}, got {cp.mask_a.shape}, {cp.mask_b.shape}"
     x1 = x[:h].copy()
     x2 = x[h:].copy()
-    t = (x2.astype(np.int64) + cp.mask_a.astype(np.int64)) % VeinnParams.q
-    t = ring_convolution(t, np.ones(h, dtype=np.int64), VeinnParams.q, 'ntt')
-    x1 = (x1.astype(np.int64) + t) % VeinnParams.q
-    u = (x1.astype(np.int64) + cp.mask_b.astype(np.int64)) % VeinnParams.q
-    u = ring_convolution(u, np.ones(h, dtype=np.int64), VeinnParams.q, 'ntt')
-    x2 = (x2.astype(np.int64) + u) % VeinnParams.q
+    t = (x2.astype(np.int64) + cp.mask_a.astype(np.int64)) % key.q
+    t = ring_convolution(t, np.ones(h, dtype=np.int64), key.q, 'ntt')
+    x1 = (x1.astype(np.int64) + t) % key.q
+    u = (x1.astype(np.int64) + cp.mask_b.astype(np.int64)) % key.q
+    u = ring_convolution(u, np.ones(h, dtype=np.int64), key.q, 'ntt')
+    x2 = (x2.astype(np.int64) + u) % key.q
     return np.concatenate([x1.astype(np.int64), x2.astype(np.int64)])
 
-def coupling_inverse(x: np.ndarray, cp: CouplingParams) -> np.ndarray:
+def coupling_inverse(x: np.ndarray, cp: CouplingParams, key: VeinnParams) -> np.ndarray:
     n = x.shape[0]
     h = n // 2
     assert x.shape == (n,), f"Expected input shape {(n,)}, got {x.shape}"
     assert cp.mask_a.shape == (h,) and cp.mask_b.shape == (h,), f"Mask shape mismatch: expected {(h,)}, got {cp.mask_a.shape}, {cp.mask_b.shape}"
     x1 = x[:h].copy()
     x2 = x[h:].copy()
-    u = (x1.astype(np.int64) + cp.mask_b.astype(np.int64)) % VeinnParams.q
-    u = ring_convolution(u, np.ones(h, dtype=np.int64), VeinnParams.q, 'ntt')
-    x2 = (x2.astype(np.int64) - u) % VeinnParams.q
-    t = (x2.astype(np.int64) + cp.mask_a.astype(np.int64)) % VeinnParams.q
-    t = ring_convolution(t, np.ones(h, dtype=np.int64), VeinnParams.q, 'ntt')
-    x1 = (x1.astype(np.int64) - t) % VeinnParams.q
+    u = (x1.astype(np.int64) + cp.mask_b.astype(np.int64)) % key.q
+    u = ring_convolution(u, np.ones(h, dtype=np.int64), key.q, 'ntt')
+    x2 = (x2.astype(np.int64) - u) % key.q
+    t = (x2.astype(np.int64) + cp.mask_a.astype(np.int64)) % key.q
+    t = ring_convolution(t, np.ones(h, dtype=np.int64), key.q, 'ntt')
+    x1 = (x1.astype(np.int64) - t) % key.q
     return np.concatenate([x1.astype(np.int64), x2.astype(np.int64)])
 
 # -----------------------------
@@ -394,32 +368,32 @@ def key_from_seed(seed: bytes, vp: VeinnParams) -> VeinnKey:
 # -----------------------------
 # Permutation (updated to use invertible scaling)
 # -----------------------------
-def permute_forward(x: np.ndarray, key: VeinnKey) -> np.ndarray:
-    vp = key.params
+def permute_forward(x: np.ndarray, key: VeinnParams) -> np.ndarray:
+    vp = key.params    
     idx = key.shuffle_idx
     assert x.shape == (vp.n,), f"Expected input shape {(vp.n,)}, got {x.shape}"
     y = x.copy()
     for r in range(vp.rounds):
         for cp in key.rounds[r].cpls:
-            y = coupling_forward(y, cp)
+            y = coupling_forward(y, cp, vp)
         # Invertible elementwise scaling
-        y = (y.astype(np.int64) * key.rounds[r].ring_scale.astype(np.int64)) % VeinnParams.q
-        y = np.array(sbox_layer(y, VeinnParams.q), dtype=np.int64)
+        y = (y.astype(np.int64) * key.rounds[r].ring_scale.astype(np.int64)) % vp.q
+        y = np.array(sbox_layer(y, vp.q), dtype=np.int64)
         y = shuffle(y, idx)
     return y.astype(np.int64)
 
-def permute_inverse(x: np.ndarray, key: VeinnKey) -> np.ndarray:
+def permute_inverse(x: np.ndarray, key: VeinnParams) -> np.ndarray:
     vp = key.params
     idx = key.shuffle_idx
     assert x.shape == (vp.n,), f"Expected input shape {(vp.n,)}, got {x.shape}"
     y = x.copy()
     for r in reversed(range(vp.rounds)):
         y = unshuffle(y, idx)
-        y = np.array(inv_sbox_layer(y, VeinnParams.q), dtype=np.int64)
+        y = np.array(inv_sbox_layer(y, vp.q), dtype=np.int64)
         # Apply precomputed inverse scaling
-        y = (y.astype(np.int64) * key.rounds[r].ring_scale_inv.astype(np.int64)) % VeinnParams.q
+        y = (y.astype(np.int64) * key.rounds[r].ring_scale_inv.astype(np.int64)) % vp.q
         for cp in reversed(key.rounds[r].cpls):
-            y = coupling_inverse(y, cp)
+            y = coupling_inverse(y, cp, vp)
     return y.astype(np.int64)
 
 # -----------------------------
@@ -432,67 +406,6 @@ def bytes_to_block(b: bytes, n: int) -> np.ndarray:
 
 def block_to_bytes(x: np.ndarray) -> bytes:
     return x.astype('<u2').tobytes()
-
-# -----------------------------
-# Homomorphic Operations
-# -----------------------------
-def _load_encrypted_file(enc_file: str):
-    metadata, _, enc_blocks, hmac_value, nonce, timestamp = read_ciphertext(enc_file)
-    meta_parsed = {
-        "n": int(metadata["n"]),
-        "rounds": int(metadata["rounds"]),
-        "layers_per_round": int(metadata["layers_per_round"]),
-        "shuffle_stride": int(metadata["shuffle_stride"]),
-        "use_lwe": metadata["use_lwe"],
-        "mode": metadata.get("mode", "n"),
-        "bytes_per_number": int(metadata.get("bytes_per_number", metadata.get("n", 4) * 2))
-    }
-    return enc_blocks, meta_parsed, hmac_value, nonce, timestamp
-
-def _write_encrypted_payload(out_file: str, enc_blocks, meta, hmac_value: str = None, nonce: bytes = None, timestamp: float = None):
-    out = {
-        "veinn_metadata": {
-            "n": int(meta["n"]),
-            "rounds": int(meta["rounds"]),
-            "layers_per_round": int(meta["layers_per_round"]),
-            "shuffle_stride": int(meta["shuffle_stride"]),
-            "use_lwe": meta["use_lwe"],
-            "mode": meta.get("mode", "n"),
-            "bytes_per_number": int(meta.get("bytes_per_number", meta["n"] * 2))
-        },
-        "enc_seed": [],
-        "encrypted": [[int(x) for x in blk.tolist()] for blk in enc_blocks]
-    }
-    if hmac_value:
-        out["hmac"] = hmac_value
-    if nonce:
-        out["nonce"] = [int(b) for b in nonce]
-    if timestamp:
-        out["timestamp"] = timestamp
-    with open(out_file, "w") as f:
-        json.dump(out, f)
-
-def homomorphic_add_files(f1: str, f2: str, out_file: str):
-    enc1, meta1, _, _, _ = _load_encrypted_file(f1)
-    enc2, meta2, _, _, _ = _load_encrypted_file(f2)
-    if meta1 != meta2:
-        raise ValueError(f"{bcolors.FAIL}Encrypted files metadata mismatch{bcolors.ENDC}")
-    if len(enc1) != len(enc2):
-        raise ValueError(f"{bcolors.FAIL}Encrypted files must have same number of blocks{bcolors.ENDC}")
-    summed = [(a + b) % VeinnParams.q for a, b in zip(enc1, enc2)]
-    _write_encrypted_payload(out_file, summed, meta1)
-    print(f"Lattice-based homomorphic sum saved to {out_file}")
-
-def homomorphic_mul_files(f1: str, f2: str, out_file: str):
-    enc1, meta1, _, _, _ = _load_encrypted_file(f1)
-    enc2, meta2, _, _, _ = _load_encrypted_file(f2)
-    if meta1 != meta2:
-        raise ValueError(f"{bcolors.FAIL}Encrypted files metadata mismatch{bcolors.ENDC}")
-    if len(enc1) != len(enc2):
-        raise ValueError(f"{bcolors.FAIL}Encrypted files must have same number of blocks{bcolors.ENDC}")
-    prod = [ring_convolution(a, b, VeinnParams.q, 'ntt') for a, b in zip(enc1, enc2)]
-    _write_encrypted_payload(out_file, prod, meta1)
-    print(f"Lattice-based homomorphic product saved to {out_file}")
 
 # -----------------------------
 # Key Management
@@ -632,7 +545,7 @@ def encrypt_with_pub(pubfile: str, file_type: str, message: Optional[str] = None
             raise ValueError(f"{bcolors.FAIL}Message required for text mode{bcolors.ENDC}")
         message_bytes = message.encode('utf-8')
 
-    message_bytes = pkcs7_pad(message_bytes, vp.n * 2)
+    message_bytes = pad_iso7816(message_bytes, vp.n * 2)
     nonce = nonce or secrets.token_bytes(16)
     ephemeral_seed, ct = ML_KEM_768.encaps(ek)
     k = key_from_seed(ephemeral_seed, vp)
@@ -683,7 +596,7 @@ def decrypt_with_priv(keystore: Optional[str], privfile: Optional[str], encfile:
     k = key_from_seed(ephemeral_seed, vp)
     dec_blocks = [permute_inverse(b, k) for b in enc_blocks]
     dec_bytes = b"".join(block_to_bytes(b) for b in dec_blocks)
-    dec_bytes = pkcs7_unpad(dec_bytes)
+    dec_bytes = unpad_iso7816(dec_bytes)
     
     print("Decrypted message:", dec_bytes.decode('utf-8'))    
 
@@ -698,7 +611,7 @@ def encrypt_with_public_veinn(seed_input: str, file_type: str, message: Optional
             raise ValueError(f"{bcolors.FAIL}Message required for text mode{bcolors.ENDC}")
         message_bytes = message.encode('utf-8')
             
-    message_bytes = pkcs7_pad(message_bytes, vp.n * 2)
+    message_bytes = pad_iso7816(message_bytes, vp.n * 2)
     nonce = nonce or secrets.token_bytes(16)
     blocks = [bytes_to_block(message_bytes[i:i + vp.n * 2], vp.n) for i in range(0, len(message_bytes), vp.n * 2)]
     for b in blocks:
@@ -739,7 +652,7 @@ def decrypt_with_public_veinn(seed_input: str, file_type: str, enc_file: str, va
     k = key_from_seed(seed, vp)
     dec_blocks = [permute_inverse(b, k) for b in enc_blocks]
     dec_bytes = b"".join(block_to_bytes(b) for b in dec_blocks)
-    dec_bytes = pkcs7_unpad(dec_bytes)
+    dec_bytes = unpad_iso7816(dec_bytes)
     
     print("Decrypted message:", dec_bytes.decode('utf-8'))    
 
@@ -888,18 +801,6 @@ def menu_decrypt_with_priv():
         return
     decrypt_with_priv(keystore, privfile, encfile, passphrase, key_name, file_type, validity_window)
 
-def menu_homomorphic_add_files():
-    f1 = input("Encrypted file 1: ").strip()
-    f2 = input("Encrypted file 2: ").strip()
-    out = input("Output filename (default hom_add.json): ").strip() or "hom_add.json"
-    homomorphic_add_files(f1, f2, out)
-
-def menu_homomorphic_mul_files():
-    f1 = input("Encrypted file 1: ").strip()
-    f2 = input("Encrypted file 2: ").strip()
-    out = input("Output filename (default hom_mul.json): ").strip() or "hom_mul.json"
-    homomorphic_mul_files(f1, f2, out)
-
 def menu_veinn_from_seed():
     use_keystore = input("Use keystore for seed? (y/n): ").strip().lower() == "y"
     seed_input, keystore, passphrase, key_name = None, None, None, None
@@ -982,18 +883,8 @@ def validate_timestamp(timestamp: float, validity_window: int) -> bool:
     return abs(current_time - timestamp) <= validity_window
 
 def main():
-    parser = argparse.ArgumentParser(description="VEINN CLI with Lattice-based INN")
+    parser = argparse.ArgumentParser(description="VEINN - Vector Encrypted Invertible Neural Network")
     subparsers = parser.add_subparsers(dest="command")
-
-    hom_add_parser = subparsers.add_parser("hom_add", help="Lattice-based homomorphic addition")
-    hom_add_parser.add_argument("--file1", required=True, help="First encrypted file")
-    hom_add_parser.add_argument("--file2", required=True, help="Second encrypted file")
-    hom_add_parser.add_argument("--out_file", default="hom_add.json", help="Output file")
-
-    hom_mul_parser = subparsers.add_parser("hom_mul", help="Lattice-based homomorphic multiplication")
-    hom_mul_parser.add_argument("--file1", required=True, help="First encrypted file")
-    hom_mul_parser.add_argument("--file2", required=True, help="Second encrypted file")
-    hom_mul_parser.add_argument("--out_file", default="hom_mul.json", help="Output file")
 
     create_keystore_parser = subparsers.add_parser("create_keystore", help="Create encrypted keystore")
     create_keystore_parser.add_argument("--passphrase", required=True, help="Keystore passphrase")
@@ -1041,10 +932,6 @@ def main():
 
     try:
         match args.command:
-            case "hom_add":
-                homomorphic_add_files(args.file1, args.file2, args.out_file)
-            case "hom_mul":
-                homomorphic_mul_files(args.file1, args.file2, args.out_file)
             case "create_keystore":
                 create_keystore(args.passphrase, args.keystore_file)
                 print(f"Keystore created: {args.keystore_file}")
@@ -1109,9 +996,7 @@ def main():
                     print(f"{bcolors.BOLD}4){bcolors.ENDC} Decrypt with private key")
                     print(f"{bcolors.BOLD}5){bcolors.ENDC} Encrypt deterministically using public VEINN")
                     print(f"{bcolors.BOLD}6){bcolors.ENDC} Decrypt deterministically using public VEINN")
-                    print(f"{bcolors.GREY}7) Lattice-based homomorphic add (file1, file2 -> out){bcolors.ENDC}")
-                    print(f"{bcolors.GREY}8) Lattice-based homomorphic multiply (file1, file2 -> out){bcolors.ENDC}")
-                    print(f"{bcolors.GREY}9) Derive public VEINN from seed{bcolors.ENDC}")
+                    print(f"{bcolors.GREY}7) Derive public VEINN from seed{bcolors.ENDC}")
                     print(f"{bcolors.BOLD}0){bcolors.ENDC} Exit")
                     choice = input(f"{bcolors.BOLD}Choice: {bcolors.ENDC}").strip()
                     try:
@@ -1131,10 +1016,6 @@ def main():
                             case "6":
                                 menu_decrypt_with_public_veinn()
                             case "7":
-                                menu_homomorphic_add_files()
-                            case "8":
-                                menu_homomorphic_mul_files()
-                            case "9":
                                 menu_veinn_from_seed()
                             case _:
                                 print("Invalid choice")

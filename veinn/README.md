@@ -202,6 +202,9 @@ MIT License
 
 ### Updates
    - Added a rough primitive.py as a conceptual example.
+   - Update padding 
+   - Update variable refs
+   - Remove homomorphic ops. For now the focus is on security. We will revisit homomorphism later.
 
 ### TODO
    - Integrate updates to command line and package.   
