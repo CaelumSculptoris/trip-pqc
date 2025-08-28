@@ -535,7 +535,7 @@ def validate_timestamp(timestamp: float, validity_window: int) -> bool:
 def veinn_from_seed(seed_input: str, vp: VeinnParams):
     seed = seed_input.encode('utf-8')
     k = key_from_seed(seed, vp)
-    print(f"Derived VEINN key with params: n={vp.n}, rounds={vp.rounds}, layers_per_round={vp.layers_per_round}, shuffle_stride={vp.shuffle_stride}, use_lwe={vp.use_lwe}")
+    print(f"Derived VEINN key with params: n={vp.n}, rounds={vp.rounds}, layers_per_round={vp.layers_per_round}, shuffle_stride={vp.shuffle_stride}, use_lwe={vp.use_lwe}")    
 
 def encrypt_with_pub(pubfile: str, file_type: str, message: Optional[str] = None, in_path: Optional[str] = None, vp: VeinnParams = VeinnParams(), seed_len: int = 32, nonce: Optional[bytes] = None, out_file: str = "enc_pub") -> str:
     with open(pubfile, "r") as f:
@@ -874,11 +874,6 @@ def menu_decrypt_with_public_veinn():
         print("Encrypted file not found.")
         return
     decrypt_with_public_veinn(seed_input, file_type, enc_file, validity_window)
-
-def veinn_from_seed(seed_input: str, vp: VeinnParams):
-    seed = seed_input.encode('utf-8')
-    k = key_from_seed(seed, vp)
-    print(f"Derived VEINN key with params: n={vp.n}, rounds={vp.rounds}, layers_per_round={vp.layers_per_round}, shuffle_stride={vp.shuffle_stride}, use_lwe={vp.use_lwe}, q={vp.q}")
 
 def validate_timestamp(timestamp: float, validity_window: int) -> bool:
     current_time = time.time()
