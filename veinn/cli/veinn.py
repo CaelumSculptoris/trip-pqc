@@ -38,9 +38,9 @@ class bcolors:
 @dataclass
 class VeinnParams:
     n: int = 512  # Number of int64 words per block
-    rounds: int = 10
-    layers_per_round: int = 10
-    shuffle_stride: int = 11
+    rounds: int = 15
+    layers_per_round: int = 15
+    shuffle_stride: int = 15
     use_lwe: bool = True
     valid: int = 3600
     seed_len: int = 32
@@ -734,6 +734,16 @@ def read_ciphertext(path: str, file_type: str):
             
     return metadata, enc_seed, enc_blocks, hmac_value, nonce, timestamp
 
+def options():
+    n = int(input(f"Number of {np.int64} words per block (default {VeinnParams.n}): ").strip() or VeinnParams.n)
+    rounds = int(input(f"Number of rounds (default {VeinnParams.rounds}): ").strip() or VeinnParams.rounds)
+    layers_per_round = int(input(f"Layers per round (default {VeinnParams.layers_per_round}): ").strip() or VeinnParams.layers_per_round)
+    shuffle_stride = int(input(f"Shuffle stride (default {VeinnParams.shuffle_stride}): ").strip() or VeinnParams.shuffle_stride)
+    use_lwe = input("Use LWE PRF for key nonlinearity (y/n) [y]: ").strip().lower() or "y"    
+    nonce_str = input("Custom nonce (base64, blank for random): ").strip() or None
+    q = int(input(f"Modulus q (default {VeinnParams.q}): ").strip() or VeinnParams.q)
+    return n, rounds, layers_per_round, shuffle_stride, use_lwe, nonce_str, q
+
 # -----------------------------
 # CLI Main with Interactive Menu
 # -----------------------------
@@ -771,16 +781,10 @@ def menu_encrypt_with_pub():
         return
     inpath = input("Optional input file path (blank = prompt): ").strip() or None    
     file_type = input("Output file type (JSON/BIN) [json] : ").strip() or "json"
-    n = int(input(f"Number of {np.int64} words per block (default {VeinnParams.n}): ").strip() or VeinnParams.n)
-    rounds = int(input(f"Number of rounds (default {VeinnParams.rounds}): ").strip() or VeinnParams.rounds)
-    layers_per_round = int(input(f"Layers per round (default {VeinnParams.layers_per_round}): ").strip() or VeinnParams.layers_per_round)
-    shuffle_stride = int(input(f"Shuffle stride (default {VeinnParams.shuffle_stride}): ").strip() or VeinnParams.shuffle_stride)
-    use_lwe = input("Use LWE PRF for key nonlinearity (y/n) [y]: ").strip().lower() or "y"
-    use_lwe = use_lwe == "y"
+    n, rounds, layers_per_round, shuffle_stride, use_lwe, nonce_str, q = options()
     seed_len = int(input(f"Seed length (default {VeinnParams.seed_len}): ").strip() or VeinnParams.seed_len)
-    nonce_str = input("Custom nonce (base64, blank for random): ").strip() or None
-    nonce = b64decode(nonce_str) if nonce_str else None
-    q = int(input(f"Modulus q (default {VeinnParams.q}): ").strip() or VeinnParams.q)
+    use_lwe = use_lwe == "y"
+    nonce = b64decode(nonce_str) if nonce_str else None    
     vp = VeinnParams(n=n, rounds=rounds, layers_per_round=layers_per_round, shuffle_stride=shuffle_stride, use_lwe=use_lwe, q=q)
     message = None    
     if inpath is None:        
@@ -842,17 +846,11 @@ def menu_encrypt_with_public_veinn():
     inpath = input("Optional input file path (blank = prompt): ").strip() or None 
     if inpath == None:
         message = input("Message to encrypt: ")    
-
-    n = int(input(f"Number of {np.int64} words per block (default {VeinnParams.n}): ").strip() or VeinnParams.n)
-    rounds = int(input(f"Number of rounds (default {VeinnParams.rounds}): ").strip() or VeinnParams.rounds)
-    layers_per_round = int(input(f"Layers per round (default {VeinnParams.layers_per_round}): ").strip() or VeinnParams.layers_per_round)
-    shuffle_stride = int(input(f"Shuffle stride (default {VeinnParams.shuffle_stride}): ").strip() or VeinnParams.shuffle_stride)
-    use_lwe = input("Use LWE PRF for key nonlinearity (y/n) [y]: ").strip().lower() or "y"
-    use_lwe = use_lwe == "y"
-    q = int(input(f"Modulus q (default {VeinnParams.q}): ").strip() or VeinnParams.q)
+    
     out_file = input("Output encrypted filename (default enc_pub_veinn): ").strip() or "enc_pub_veinn"      
     file_type = input("Output file type (JSON/BIN) [json] : ").strip() or "json"
-    nonce_str = input("Custom nonce (base64, blank for random): ").strip() or None
+    n, rounds, layers_per_round, shuffle_stride, use_lwe, nonce_str, q = options()
+    use_lwe = use_lwe == "y"
     nonce = b64decode(nonce_str) if nonce_str else None
     vp = VeinnParams(n=n, rounds=rounds, layers_per_round=layers_per_round, shuffle_stride=shuffle_stride, use_lwe=use_lwe, q=q)
     encrypt_with_public_veinn(seed_input, file_type, message, inpath, vp, out_file, nonce)
