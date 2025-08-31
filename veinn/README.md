@@ -201,12 +201,8 @@ MIT License
    - 25 YoE in software engineering, frontend frameworks specialist. Zero YoE Python/Cryptography. Please dont judge me too strongly, I know the code looks like garbage. Primarily trying to get a working and stable PoC before I refactor the code and abstract the VEINN primitive out as an importable class. If you'd like to help clean up some of my code, create a pull request.
 
 ### Updates
-   - Added a rough primitive.py as a conceptual example.
-   - Update padding 
-   - Update variable refs
-   - Remove homomorphic ops. For now the focus is on security. We will revisit homomorphism later.
+   - Added VEINN KEM support functions. Still testing implementation.
 
 ### TODO
    - Integrate updates to command line and package.   
-   - NTRU.
-   - Public key derived parameters... maybe. Considerating Asymmetry.
+   - Kyber achieves its security by applying the Fujisaki-Okamoto transform to an underlying IND-CPA-secure inner PKE scheme. So we're gonna try to roll our own to achieve parity with Kyber such that we can abstract Kyber as a dependancy out of VEINN enabling VEINN to be a stand alone asymmetric solution.

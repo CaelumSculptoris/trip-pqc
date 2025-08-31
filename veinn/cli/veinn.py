@@ -412,6 +412,118 @@ def block_to_bytes(x: np.ndarray) -> bytes:
     return x.astype('<u2').tobytes()
 
 # -----------------------------
+# Sampling Helpers (for small distributions, deterministic variant)
+# -----------------------------
+def sample_small_det(size: int, vp: VeinnParams, rand_seed: bytes, tag: bytes) -> np.ndarray:
+    raw = shake(size, rand_seed, tag)
+    e = np.frombuffer(raw, dtype=np.uint8)[:size]
+    e = ((e % 9) - 4).astype(np.int64) % vp.q
+    return e
+
+# -----------------------------
+# VEINN PKE (IND-CPA)
+# -----------------------------
+def veinn_pke_keygen(vp: VeinnParams) -> tuple[dict, dict]:
+    n = vp.n
+    inn_seed = secrets.token_bytes(vp.seed_len)
+    a_seed = secrets.token_bytes(32)  # For uniform a
+    a = derive_u16(n, vp, a_seed, b"a")
+    s = sample_small_det(n, vp, secrets.token_bytes(32), b"s")
+    e = sample_small_det(n, vp, secrets.token_bytes(32), b"e")
+    b = (ring_convolution(a, s, vp.q) + e) % vp.q
+    pk = {
+        "a": a.tolist(),
+        "b": b.tolist(),
+        "inn_seed": b64encode(inn_seed).decode()  # Encode bytes to base64 string
+    }
+    sk = {
+        "s": s.tolist(),
+        "inn_seed": b64encode(inn_seed).decode()  # Encode bytes to base64 string
+    }
+    return pk, sk
+
+def veinn_pke_encrypt(pk: dict, m: bytes, vp: VeinnParams, rand_seed: bytes) -> dict:
+    n = vp.n
+    inn_seed_bytes = b64decode(pk["inn_seed"])  # Decode base64 string back to bytes
+    inn_key = key_from_seed(inn_seed_bytes, vp)
+    padded_m = pad_iso7816(m, 2 * n)
+    x = bytes_to_block(padded_m, n)
+    y = permute_forward(x, inn_key)
+    v = sample_small_det(n, vp, rand_seed, b"v")
+    r = sample_small_det(n, vp, rand_seed, b"r")
+    e0 = sample_small_det(n, vp, rand_seed, b"e0")
+    e1 = sample_small_det(n, vp, rand_seed, b"e1")
+    a = np.array(pk["a"], dtype=np.int64)
+    b = np.array(pk["b"], dtype=np.int64)
+    c0 = (ring_convolution(a, r, vp.q) + e0) % vp.q
+    c1 = (ring_convolution(b, r, vp.q) + e1 + v) % vp.q
+    c2 = (y + v) % vp.q
+    ct = {
+        "c0": c0.tolist(),
+        "c1": c1.tolist(),
+        "c2": c2.tolist()
+    }
+    return ct
+
+def veinn_pke_decrypt(sk: dict, ct: dict, vp: VeinnParams) -> bytes:
+    n = vp.n
+    s = np.array(sk["s"], dtype=np.int64)
+    c0 = np.array(ct["c0"], dtype=np.int64)
+    c1 = np.array(ct["c1"], dtype=np.int64)
+    c2 = np.array(ct["c2"], dtype=np.int64)
+    v_prime = (c1 - ring_convolution(c0, s, vp.q)) % vp.q
+    y_prime = (c2 - v_prime) % vp.q
+    inn_seed_bytes = b64decode(sk["inn_seed"])  # Decode base64 string back to bytes
+    inn_key = key_from_seed(inn_seed_bytes, vp)
+    x_prime = permute_inverse(y_prime, inn_key)
+    padded_m = block_to_bytes(x_prime)
+    try:
+        m = unpad_iso7816(padded_m)
+    except ValueError:
+        m = b""  # Failure case (negligible prob)
+    return m
+
+# -----------------------------
+# VEINN KEM (IND-CCA via FO Transform)
+# -----------------------------
+def veinn_kem_keygen(vp: VeinnParams) -> tuple[dict, dict]:
+    pk, sk_pke = veinn_pke_keygen(vp)
+    z = secrets.token_bytes(32)  # For implicit rejection
+    h_pk = shake(32, json.dumps(pk).encode())  # H(ek)
+    sk = {
+        "sk_pke": sk_pke,
+        "pk": pk,  # Stored for convenience
+        "z": b64encode(z).decode(),  # Encode bytes to base64 string
+        "h_pk": b64encode(h_pk).decode()  # Encode bytes to base64 string
+    }
+    return pk, sk
+
+def veinn_kem_encaps(pk: dict, vp: VeinnParams) -> tuple[dict, bytes]:
+    m = secrets.token_bytes(32)
+    h_pk = shake(32, json.dumps(pk).encode())  # H(ek)
+    g_out = shake(64, m + h_pk)  # G(m || H(ek))
+    K_bar = g_out[:32]
+    r = g_out[32:]
+    c = veinn_pke_encrypt(pk, m, vp, r)  # Deterministic enc with r
+    K = shake(32, K_bar + shake(32, json.dumps(c).encode()))  # J(K_bar || H(c))
+    return c, K
+
+def veinn_kem_decaps(sk: dict, c: dict, vp: VeinnParams) -> bytes:
+    m_prime = veinn_pke_decrypt(sk["sk_pke"], c, vp)
+    h_pk = b64decode(sk["h_pk"])  # Decode base64 string back to bytes
+    g_out = shake(64, m_prime + h_pk)  # G(m' || H(ek))
+    K_bar_prime = g_out[:32]
+    r_prime = g_out[32:]
+    c_prime = veinn_pke_encrypt(sk["pk"], m_prime, vp, r_prime)
+    h_c = shake(32, json.dumps(c).encode())  # H(c)
+    if json.dumps(c_prime) == json.dumps(c):  # Re-encryption check
+        K = shake(32, K_bar_prime + h_c)  # J(K_bar' || H(c))
+    else:  # Implicit rejection
+        z = b64decode(sk["z"])  # Decode base64 string back to bytes
+        K = shake(32, z + h_c)  # J(z || H(c))
+    return K
+
+# -----------------------------
 # Key Management
 # -----------------------------
 def create_keystore(passphrase: str, keystore_file: str):
@@ -481,6 +593,10 @@ def bytes_be_to_int(b: bytes) -> int:
 def generate_kyber_keypair() -> dict:
     ek, dk = ML_KEM_768.keygen()
     return {"ek": list(ek), "dk": list(dk)}  # Store as lists for JSON
+
+def generate_veinn_keypair(vp: VeinnParams = VeinnParams()) -> dict:
+    pk, sk = veinn_kem_keygen(vp)
+    return {"ek": list(pk), "dk": list(sk)}  # Mimic Kyber format
 
 # -----------------------------
 # Encryption/Decryption
