@@ -133,6 +133,25 @@ class RoundParams:
     ring_scale_inv: np.ndarray  # Precomputed modular inverses
 
 # -----------------------------
+# Veinn Key
+# -----------------------------
+@dataclass
+class VeinnKey:
+    """
+    Complete VEINN cipher key containing all round parameters.
+    
+    Derived deterministically from a seed using cryptographic key derivation.
+    Contains all parameters needed for encryption/decryption:
+    - Round coupling parameters
+    - Permutation indices
+    - Invertible scaling factors
+    """
+    seed: bytes                      # Original key seed
+    params: VeinnParams             # Cipher parameters
+    shuffle_idx: np.ndarray         # Permutation indices
+    rounds: list[RoundParams]       # Per-round parameters
+
+# -----------------------------
 # Utilities
 # -----------------------------
 def shake(expand_bytes: int, *chunks: bytes) -> bytes:
@@ -854,25 +873,6 @@ def ensure_coprime_to_q_vec(vec, q):
     # Change any multiples of q to 1 to ensure invertibility
     vec = np.where(vec % q == 0, 1, vec)
     return vec
-
-# -----------------------------
-# Veinn Key
-# -----------------------------
-@dataclass
-class VeinnKey:
-    """
-    Complete VEINN cipher key containing all round parameters.
-    
-    Derived deterministically from a seed using cryptographic key derivation.
-    Contains all parameters needed for encryption/decryption:
-    - Round coupling parameters
-    - Permutation indices
-    - Invertible scaling factors
-    """
-    seed: bytes                      # Original key seed
-    params: VeinnParams             # Cipher parameters
-    shuffle_idx: np.ndarray         # Permutation indices
-    rounds: list[RoundParams]       # Per-round parameters
 
 def key_from_seed(seed: bytes, vp: VeinnParams) -> VeinnKey:
     """
