@@ -198,11 +198,14 @@ It is not yet standardized, audited, or production-ready. Use at your own risk.
 MIT License
 
 ## Notes
-   - 25 YoE in software engineering, frontend frameworks specialist. Zero YoE Python/Cryptography. Please dont judge me too strongly, I know the code looks like garbage. Primarily trying to get a working and stable PoC before I refactor the code and abstract the VEINN primitive out as an importable class. If you'd like to help clean up some of my code, create a pull request.
+   - Baked in Fujisaki-Okamoto transforms to abstract Kyber out requires more time, will revist. Refactor and clean up now prioritized.
 
 ### Updates
-   - Added VEINN KEM support functions. Still testing implementation.
+   - Added documentation to veinn.py
+   - Kyber abstraction... You know what I'm going to leave this as an exercise for the reader to implement.
 
 ### TODO
    - Integrate updates to command line and package.   
-   - Kyber achieves its security by applying the Fujisaki-Okamoto transform to an underlying IND-CPA-secure inner PKE scheme. So we're gonna try to roll our own to achieve parity with Kyber such that we can abstract Kyber as a dependancy out of VEINN enabling VEINN to be a stand alone asymmetric solution.
+   - Considering swaping ISO 7816 for OAEP.
+   - Remove unused functions in veinn.py.
+   - Wrapper for Keygen/Encaps/Decaps allowing easy swaping of Kyber/FO
