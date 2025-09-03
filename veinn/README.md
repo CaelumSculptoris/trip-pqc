@@ -200,8 +200,17 @@ MIT License
 ## Notes
    - Baked in Fujisaki-Okamoto transforms to abstract Kyber out requires more time, will revist. Refactor and clean up now prioritized.
 
-### Updates
-   - Added documentation to veinn.py
+### Vector Space Notes
+   - Treat one partition of the INN state as a basis (row/column vector), and embed the plaintext via dot products into that Vector space.
+	- This makes decryption equivalent to projecting back out of a high-dimensional functional space without knowing the basis.
+	- Hardness aspect: this ties plaintext recovery to solving an inverse functional decomposition problem in vector space, which is infeasible without the right partition (key).
+	- Analogy: it’s like “hiding” the message inside a random orthogonal projection — but the projection is entangled with the secret INN state.
+   - r and s are functionally the left and right basis elements. Together they map plaintext coefficients into a bilinear product (a rank-1-ish embedding if r and s were rank-1 operators; with full polynomials they act as dense operators).
+	- The core hardness intuition: an attacker seeing only c = r ⋆ m ⋆ s + e must recover m without knowing r/s — this is akin to solving for m from bilinear measurements, which is hard if r and s are unknown, random, and invertible (especially with added noise).
+   - Considerably harder, considerably slower.
+
+### Updates   
+   - Added experimental "Hilbert" space coupling functions to project plaintext into vectorspace. Currently commented out during testing. Probably will deprecate. Currently ring_convolution/RLWE is like a sigma function. In ring convolution the structure is circulant / Toeplitz and the NTT makes it diagonal, whereas projecting the plaintext into vector space is closer to tensor product structure.
    - Kyber abstraction... You know what I'm going to leave this as an exercise for the reader to implement.
 
 ### TODO

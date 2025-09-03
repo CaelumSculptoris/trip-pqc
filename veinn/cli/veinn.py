@@ -651,6 +651,89 @@ def lwe_prf_expand(seed: bytes, out_n: int, vp: VeinnParams) -> np.ndarray:
 # -----------------------------
 # Coupling Layer
 # -----------------------------
+import hashlib
+import numpy as np
+
+# ---- helpers (use the same ones everywhere) ----
+def derive_layer_seed_from_masks_and_key(mask_a: np.ndarray, mask_b: np.ndarray, key, layer_idx: int) -> bytes:
+    h = hashlib.shake_256()
+    h.update(b"VEINN-HILBERT-SEED-V1")
+    h.update(mask_a.tobytes())
+    h.update(mask_b.tobytes())    
+    return h.digest(32)
+
+def derive_kernel_from_seed(seed: bytes, tag: bytes, h: int, q: int) -> np.ndarray:
+    sh = hashlib.shake_256()
+    sh.update(seed)
+    sh.update(tag)
+    
+    raw = sh.digest(2*h)
+    coeffs = np.frombuffer(raw, dtype=np.uint8).astype(np.int64)
+    coeffs = (coeffs[0::2] | (coeffs[1::2] << 8)) % q
+    coeffs[0] = (coeffs[0] + 1) % q  # make it more unit-like
+    return coeffs
+
+def conv_op(vec: np.ndarray, kernel: np.ndarray, q: int) -> np.ndarray:    
+    return ring_convolution(vec, kernel.astype(np.int64), q, 'ntt')
+
+def block_apply_R(x1: np.ndarray, x2: np.ndarray, t: np.ndarray, q: int):
+    # R = [[I, Conv_t],[0,I]]
+    return ( (x1 + conv_op(x2, t, q)) % q, x2.copy() )
+
+def block_apply_S(x1: np.ndarray, x2: np.ndarray, u: np.ndarray, q: int):
+    # S = [[I,0],[Conv_u,I]]
+    return ( x1.copy(), (x2 + conv_op(x1, u, q)) % q )
+
+def block_apply_R_inv(y1: np.ndarray, y2: np.ndarray, t: np.ndarray, q: int):
+    # R^{-1} = [[I,-Conv_t],[0,I]]
+    return ( (y1 - conv_op(y2, t, q)) % q, y2.copy() )
+
+def block_apply_S_inv(y1: np.ndarray, y2: np.ndarray, u: np.ndarray, q: int):
+    # S^{-1} = [[I,0],[-Conv_u,I]]
+    return ( y1.copy(), (y2 - conv_op(y1, u, q)) % q )
+
+# ---- corrected Hilbert coupling (preserves both halves) ----
+def coupling_forward_hilbert(x: np.ndarray, cp:CouplingParams, key:VeinnParams, layer_idx: int) -> np.ndarray:
+    """
+    Hilbertized coupling: preserves both halves; applies R then S with seeded kernels.
+    Drop-in replacement for your original coupling_forward inside permute().
+    """
+    n = x.shape[0]; h = n // 2; q = key.q
+    assert x.shape == (n,)
+    x1 = x[:h].astype(np.int64).copy()
+    x2 = x[h:].astype(np.int64).copy()
+    
+    seed = derive_layer_seed_from_masks_and_key(cp.mask_a, cp.mask_b, key, layer_idx)
+    t = derive_kernel_from_seed(seed, b"R", h, q)
+    u = derive_kernel_from_seed(seed, b"S", h, q)
+    m = derive_kernel_from_seed(seed, b"M", h, q)
+
+    y1, y2 = block_apply_R(x1, x2, t, q)
+    y1, y2 = ( y1 + conv_op(y2, m, q) ) % q, y2            
+    y1, y2 = block_apply_S(y1, y2, u, q)
+    return np.concatenate([y1.astype(np.int64), y2.astype(np.int64)])
+
+def coupling_inverse_hilbert(y: np.ndarray, cp:CouplingParams, key, layer_idx: int) -> np.ndarray:
+    """
+    Inverse of the above: strictly S^{-1} then R^{-1}. Also preserves both halves.
+    Drop-in replacement for your original coupling_inverse inside inverse permute().
+    """
+    n = y.shape[0]; h = n // 2; q = key.q
+    assert y.shape == (n,)
+    y1 = y[:h].astype(np.int64).copy()
+    y2 = y[h:].astype(np.int64).copy()
+
+    seed = derive_layer_seed_from_masks_and_key(cp.mask_a, cp.mask_b, key, layer_idx)
+    t = derive_kernel_from_seed(seed, b"R", h, q)    
+    u = derive_kernel_from_seed(seed, b"S", h, q)
+    m = derive_kernel_from_seed(seed, b"M", h, q)
+
+    x1, x2 = block_apply_S_inv(y1, y2, u, q)
+    y1, y2 = ( (y1 - conv_op(y2, m, q)) % q, y2 )
+    x1, x2 = block_apply_R_inv(x1, x2, t, q)
+
+    return np.concatenate([x1.astype(np.int64), x2.astype(np.int64)])
+
 def coupling_forward(x: np.ndarray, cp: CouplingParams, key: VeinnParams) -> np.ndarray:
     """
     Forward coupling layer transformation (encryption direction).
@@ -974,7 +1057,8 @@ def permute_forward(x: np.ndarray, key: VeinnKey) -> np.ndarray:
         # Coupling layers: invertible nonlinear mixing
         for cp in key.rounds[r].cpls:
             y = coupling_forward(y, cp, vp)
-        
+            #y = coupling_forward_hilbert(y, cp, vp, idx)
+
         # Invertible element-wise scaling (adds algebraic complexity)
         y = (y.astype(np.int64) * key.rounds[r].ring_scale.astype(np.int64)) % vp.q
         
@@ -983,7 +1067,6 @@ def permute_forward(x: np.ndarray, key: VeinnKey) -> np.ndarray:
         
         # Shuffle layer: linear permutation (diffusion)
         y = shuffle(y, idx)
-        
     return y.astype(np.int64)
 
 def permute_inverse(x: np.ndarray, key: VeinnKey) -> np.ndarray:
@@ -1030,7 +1113,7 @@ def permute_inverse(x: np.ndarray, key: VeinnKey) -> np.ndarray:
         # Reverse coupling layers in reverse order
         for cp in reversed(key.rounds[r].cpls):
             y = coupling_inverse(y, cp, vp)
-            
+            #y = coupling_inverse_hilbert(y, cp, vp, idx)
     return y.astype(np.int64)
 
 # -----------------------------
@@ -1852,6 +1935,7 @@ def encrypt_with_pub(pubfile: str, file_type: str, message: Optional[str] = None
     if in_path:
         with open(in_path, "rb") as f:
             message_bytes = f.read()
+            
     else:
         if not message:
             raise ValueError(f"{bcolors.FAIL}Message required for text mode{bcolors.ENDC}")
