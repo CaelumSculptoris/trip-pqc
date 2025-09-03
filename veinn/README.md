@@ -202,11 +202,11 @@ MIT License
 
 ### Vector Space Notes
    - Treat one partition of the INN state as a basis (row/column vector), and embed the plaintext via dot products into that Vector space.
-	- This makes decryption equivalent to projecting back out of a high-dimensional functional space without knowing the basis.
-	- Hardness aspect: this ties plaintext recovery to solving an inverse functional decomposition problem in vector space, which is infeasible without the right partition (key).
-	- Analogy: it’s like “hiding” the message inside a random orthogonal projection — but the projection is entangled with the secret INN state.
+   - This makes decryption equivalent to projecting back out of a high-dimensional functional space without knowing the basis.
+   - Hardness aspect: this ties plaintext recovery to solving an inverse functional decomposition problem in vector space, which is infeasible without the right partition (key).
+   - Analogy: it’s like “hiding” the message inside a random orthogonal projection — but the projection is entangled with the secret INN state.
    - r and s are functionally the left and right basis elements. Together they map plaintext coefficients into a bilinear product (a rank-1-ish embedding if r and s were rank-1 operators; with full polynomials they act as dense operators).
-	- The core hardness intuition: an attacker seeing only c = r ⋆ m ⋆ s + e must recover m without knowing r/s — this is akin to solving for m from bilinear measurements, which is hard if r and s are unknown, random, and invertible (especially with added noise).
+   - The core hardness intuition: an attacker seeing only c = r ⋆ m ⋆ s + e must recover m without knowing r/s — this is akin to solving for m from bilinear measurements, which is hard if r and s are unknown, random, and invertible (especially with added noise).
    - Considerably harder, considerably slower.
 
 ### Updates   
