@@ -651,7 +651,6 @@ def lwe_prf_expand(seed: bytes, out_n: int, vp: VeinnParams) -> np.ndarray:
 # -----------------------------
 # Coupling Layer
 # -----------------------------
-
 def derive_layer_seed_from_masks_and_key(mask_a: np.ndarray, mask_b: np.ndarray, layer_idx: int) -> bytes:
     """
     Derives a cryptographic seed for a specific layer using input masks and layer index.
