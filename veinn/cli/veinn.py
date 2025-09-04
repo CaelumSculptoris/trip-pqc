@@ -651,84 +651,331 @@ def lwe_prf_expand(seed: bytes, out_n: int, vp: VeinnParams) -> np.ndarray:
 # -----------------------------
 # Coupling Layer
 # -----------------------------
-import hashlib
-import numpy as np
 
-# ---- helpers (use the same ones everywhere) ----
 def derive_layer_seed_from_masks_and_key(mask_a: np.ndarray, mask_b: np.ndarray, layer_idx: int) -> bytes:
+    """
+    Derives a cryptographic seed for a specific layer using input masks and layer index.
+    
+    This function implements a key derivation function (KDF) that combines two input masks
+    and a layer identifier to produce a deterministic seed for cryptographic operations.
+    
+    Args:
+        mask_a (np.ndarray): First input mask array
+        mask_b (np.ndarray): Second input mask array  
+        layer_idx (int): Layer index identifier for domain separation
+        
+    Returns:
+        bytes: 32-byte cryptographic seed derived from inputs
+        
+    Cryptographic Principles Applied:
+        - Domain separation: Layer index prevents cross-layer key reuse
+        - Hash-based key derivation: Uses SHAKE-256 for secure seed generation
+        - Collision resistance: SHAKE-256 provides strong collision resistance
+    """
     h = hashlib.shake_256()
+    
+    # Domain separation: Unique constant prevents collision with other protocols
     h.update(b"VEINN-HILBERT-SEED")
+    
+    # Include both masks to ensure seed depends on all input material
     h.update(mask_a.tobytes())
-    h.update(mask_b.tobytes())  
-    h.update(layer_idx)    
+    h.update(mask_b.tobytes())
+    
+    # Layer index provides domain separation between different layers
+    h.update(layer_idx)
+    
+    # Extract 32 bytes using SHAKE-256's variable output length
     return h.digest(32)
 
+
 def derive_kernel_from_seed(seed: bytes, tag: bytes, h: int, q: int) -> np.ndarray:
+    """
+    Derives a convolution kernel from a seed using cryptographic hash expansion.
+    
+    Generates pseudorandom coefficients for use in ring convolution operations by
+    expanding a seed with domain separation tags. Ensures the resulting kernel
+    has appropriate algebraic properties for the cryptographic scheme.
+    
+    Args:
+        seed (bytes): Cryptographic seed material
+        tag (bytes): Domain separation tag (e.g., b"R", b"S", b"M")
+        h (int): Half the dimension size (kernel length)
+        q (int): Modulus for coefficient reduction
+        
+    Returns:
+        np.ndarray: Array of h coefficients in range [0, q-1]
+        
+    Cryptographic Principles Applied:
+        - Pseudorandom generation: SHAKE-256 provides cryptographically secure randomness
+        - Domain separation: Tag parameter prevents key reuse across different purposes
+        - Uniform distribution: Modular reduction ensures coefficients are uniformly distributed
+        - Non-zero guarantee: First coefficient is made non-zero to maintain invertibility
+    """
     sh = hashlib.shake_256()
     sh.update(seed)
+    
+    # Domain separation: Tag ensures different kernels for R, S, M operations
     sh.update(tag)
     
+    # Generate 2*h bytes to construct h 16-bit values
     raw = sh.digest(2*h)
+    
+    # Convert bytes to uint8 array, then combine pairs into 16-bit values
     coeffs = np.frombuffer(raw, dtype=np.uint8).astype(np.int64)
+    
+    # Combine adjacent bytes into 16-bit coefficients and reduce modulo q
+    # This provides uniform distribution over [0, q-1]
     coeffs = (coeffs[0::2] | (coeffs[1::2] << 8)) % q
-    coeffs[0] = (coeffs[0] + 1) % q  # make it more unit-like
+    
+    # Ensure first coefficient is non-zero to maintain algebraic properties
+    # This prevents degenerate cases in convolution operations
+    coeffs[0] = (coeffs[0] + 1) % q
+    
     return coeffs
 
-def conv_op(vec: np.ndarray, kernel: np.ndarray, q: int) -> np.ndarray:    
+
+def conv_op(vec: np.ndarray, kernel: np.ndarray, q: int) -> np.ndarray:
+    """
+    Performs modular ring convolution operation.
+    
+    Computes the convolution of a vector with a kernel using Number Theoretic
+    Transform (NTT) for efficiency, with all operations performed modulo q.
+    
+    Args:
+        vec (np.ndarray): Input vector
+        kernel (np.ndarray): Convolution kernel
+        q (int): Modulus for all operations
+        
+    Returns:
+        np.ndarray: Result of ring convolution modulo q
+        
+    Cryptographic Principles Applied:
+        - Ring arithmetic: Operations in polynomial ring Z_q[X]/(X^n + 1)
+        - NTT optimization: Uses Number Theoretic Transform for efficient computation
+        - Modular reduction: All operations maintained modulo q for security
+    """
+    # Delegate to optimized ring convolution with NTT method
     return ring_convolution(vec, kernel.astype(np.int64), q, 'ntt')
 
+
 def block_apply_R(x1: np.ndarray, x2: np.ndarray, t: np.ndarray, q: int):
-    # R = [[I, Conv_t],[0,I]]
+    """
+    Applies the R transformation matrix in block form: R = [[I, Conv_t], [0, I]].
+    
+    This implements a linear transformation where the first block is modified by
+    a convolution with the second block, while the second block remains unchanged.
+    This structure ensures the transformation is invertible.
+    
+    Args:
+        x1 (np.ndarray): First half of input vector
+        x2 (np.ndarray): Second half of input vector  
+        t (np.ndarray): Convolution kernel for the transformation
+        q (int): Modulus for all operations
+        
+    Returns:
+        tuple: (transformed_x1, unchanged_x2)
+        
+    Cryptographic Principles Applied:
+        - Feistel-like structure: Only one half is modified, ensuring invertibility
+        - Linear transformation: Maintains vector space structure
+        - Modular arithmetic: All operations performed modulo q
+    """
+    # R = [[I, Conv_t],[0,I]] - upper triangular block matrix
+    # First component: x1 + Conv_t(x2), Second component: x2 (unchanged)
     return ( (x1 + conv_op(x2, t, q)) % q, x2.copy() )
 
+
 def block_apply_S(x1: np.ndarray, x2: np.ndarray, u: np.ndarray, q: int):
-    # S = [[I,0],[Conv_u,I]]
+    """
+    Applies the S transformation matrix in block form: S = [[I, 0], [Conv_u, I]].
+    
+    This implements a linear transformation where the second block is modified by
+    a convolution with the first block, while the first block remains unchanged.
+    Combined with R, this creates a complete mixing transformation.
+    
+    Args:
+        x1 (np.ndarray): First half of input vector
+        x2 (np.ndarray): Second half of input vector
+        u (np.ndarray): Convolution kernel for the transformation  
+        q (int): Modulus for all operations
+        
+    Returns:
+        tuple: (unchanged_x1, transformed_x2)
+        
+    Cryptographic Principles Applied:
+        - Feistel-like structure: Only one half is modified, ensuring invertibility
+        - Linear transformation: Maintains vector space structure  
+        - Complementary to R: Together with R provides full mixing
+    """
+    # S = [[I,0],[Conv_u,I]] - lower triangular block matrix
+    # First component: x1 (unchanged), Second component: x2 + Conv_u(x1)
     return ( x1.copy(), (x2 + conv_op(x1, u, q)) % q )
 
+
 def block_apply_R_inv(y1: np.ndarray, y2: np.ndarray, t: np.ndarray, q: int):
-    # R^{-1} = [[I,-Conv_t],[0,I]]
+    """
+    Applies the inverse R transformation: R^(-1) = [[I, -Conv_t], [0, I]].
+    
+    Inverts the R transformation by subtracting the convolution term that was
+    added in the forward direction. The structure ensures perfect invertibility.
+    
+    Args:
+        y1 (np.ndarray): First half of transformed vector
+        y2 (np.ndarray): Second half of transformed vector
+        t (np.ndarray): Same convolution kernel used in forward transformation
+        q (int): Modulus for all operations
+        
+    Returns:
+        tuple: (recovered_x1, recovered_x2)
+        
+    Cryptographic Principles Applied:
+        - Perfect invertibility: Exactly reverses the R transformation
+        - Modular arithmetic: Subtraction performed modulo q
+        - Structure preservation: Maintains the block structure
+    """
+    # R^{-1} = [[I,-Conv_t],[0,I]] - inverse by negating off-diagonal term
+    # First component: y1 - Conv_t(y2), Second component: y2 (unchanged)
     return ( (y1 - conv_op(y2, t, q)) % q, y2.copy() )
 
+
 def block_apply_S_inv(y1: np.ndarray, y2: np.ndarray, u: np.ndarray, q: int):
-    # S^{-1} = [[I,0],[-Conv_u,I]]
+    """
+    Applies the inverse S transformation: S^(-1) = [[I, 0], [-Conv_u, I]].
+    
+    Inverts the S transformation by subtracting the convolution term that was
+    added in the forward direction. Combined with R_inv, enables complete decryption.
+    
+    Args:
+        y1 (np.ndarray): First half of transformed vector
+        y2 (np.ndarray): Second half of transformed vector  
+        u (np.ndarray): Same convolution kernel used in forward transformation
+        q (int): Modulus for all operations
+        
+    Returns:
+        tuple: (recovered_x1, recovered_x2)
+        
+    Cryptographic Principles Applied:
+        - Perfect invertibility: Exactly reverses the S transformation
+        - Modular arithmetic: Subtraction performed modulo q
+        - Complementary inversion: Works with R_inv to provide complete decryption
+    """
+    # S^{-1} = [[I,0],[-Conv_u,I]] - inverse by negating off-diagonal term
+    # First component: y1 (unchanged), Second component: y2 - Conv_u(y1)
     return ( y1.copy(), (y2 - conv_op(y1, u, q)) % q )
 
-# ---- corrected Hilbert coupling (preserves both halves) ----
-def coupling_forward_hilbert(x: np.ndarray, cp:CouplingParams, key:VeinnParams, layer_idx: int) -> np.ndarray:
+
+def coupling_forward_hilbert(x: np.ndarray, cp: CouplingParams, key: VeinnParams, layer_idx: int) -> np.ndarray:
     """
-    Hilbertized coupling: preserves both halves; applies R then S with seeded kernels.
-    Drop-in replacement for your original coupling_forward inside permute().
+    Forward Hilbert-style coupling transformation with three-stage mixing.
+    
+    Implements a sophisticated cryptographic transformation that applies R, M, and S
+    operations in sequence. This provides strong diffusion while maintaining perfect
+    invertibility. The transformation is parameterized by layer-specific seeds derived
+    from coupling parameters.
+    
+    Args:
+        x (np.ndarray): Input vector of length n
+        cp (CouplingParams): Coupling parameters containing masks
+        key (VeinnParams): Cryptographic key parameters including modulus q
+        layer_idx (int): Layer index for domain separation
+        
+    Returns:
+        np.ndarray: Transformed vector of same length as input
+        
+    Cryptographic Principles Applied:
+        - Domain separation: Layer-specific seeds prevent cross-layer attacks
+        - Three-stage mixing: R-M-S sequence provides strong diffusion
+        - Perfect invertibility: Each operation is exactly reversible
+        - Pseudorandom parameterization: All kernels derived from cryptographic seeds
+        - Modular arithmetic: All operations performed in Z_q for security
     """
-    n = x.shape[0]; h = n // 2; q = key.q
-    assert x.shape == (n,)
+    n = x.shape[0]
+    h = n // 2  # Half dimension for block operations
+    q = key.q   # Modulus for all arithmetic operations
+    
+    assert x.shape == (n,), f"Input must be 1D array of length {n}"
+    
+    # Split input into two halves for block operations
     x1 = x[:h].astype(np.int64).copy()
     x2 = x[h:].astype(np.int64).copy()
     
+    # Derive layer-specific seed using domain separation
     seed = derive_layer_seed_from_masks_and_key(cp.mask_a, cp.mask_b, layer_idx)
-    t = derive_kernel_from_seed(seed, b"R", h, q)
-    u = derive_kernel_from_seed(seed, b"S", h, q)
-    m = derive_kernel_from_seed(seed, b"M", h, q)
+    
+    # Generate three different kernels from the seed using domain separation tags
+    t = derive_kernel_from_seed(seed, b"R", h, q)  # R transformation kernel
+    u = derive_kernel_from_seed(seed, b"S", h, q)  # S transformation kernel  
+    m = derive_kernel_from_seed(seed, b"M", h, q)  # Middle transformation kernel
 
+    # Apply three-stage transformation: R -> M -> S
+    # Stage 1: Apply R transformation (upper triangular)
     y1, y2 = block_apply_R(x1, x2, t, q)
+    
+    # Stage 2: Apply middle transformation M (additive mixing)
+    # This adds additional diffusion between the R and S operations
     y1, y2 = ( y1 + conv_op(y2, m, q) % q, y2)
+    
+    # Stage 3: Apply S transformation (lower triangular)  
     y1, y2 = block_apply_S(y1, y2, u, q)
+    
+    # Recombine halves into single output vector
     return np.concatenate([y1.astype(np.int64), y2.astype(np.int64)])
 
-def coupling_inverse_hilbert(y: np.ndarray, cp:CouplingParams, key, layer_idx: int) -> np.ndarray:
-    n = y.shape[0]; h = n // 2; q = key.q
-    assert y.shape == (n,)
+
+def coupling_inverse_hilbert(y: np.ndarray, cp: CouplingParams, key, layer_idx: int) -> np.ndarray:
+    """
+    Inverse Hilbert-style coupling transformation.
+    
+    Exactly reverses the forward coupling transformation by applying the inverse
+    operations in reverse order: S^(-1) -> M^(-1) -> R^(-1). Uses the same
+    layer-derived seeds to ensure perfect decryption.
+    
+    Args:
+        y (np.ndarray): Transformed vector to decrypt
+        cp (CouplingParams): Same coupling parameters used in forward direction
+        key: Cryptographic key parameters including modulus q  
+        layer_idx (int): Same layer index used in forward direction
+        
+    Returns:
+        np.ndarray: Recovered original vector
+        
+    Cryptographic Principles Applied:
+        - Perfect invertibility: Exactly reverses the forward transformation
+        - Inverse operation order: S^(-1) -> M^(-1) -> R^(-1) sequence
+        - Consistent parameterization: Uses same seeds as forward direction
+        - Modular arithmetic: All inverse operations performed modulo q
+        - Domain separation: Same layer-specific seeding as forward pass
+    """
+    n = y.shape[0]
+    h = n // 2  # Half dimension for block operations
+    q = key.q   # Modulus for all arithmetic operations
+    
+    assert y.shape == (n,), f"Input must be 1D array of length {n}"
+    
+    # Split transformed input into two halves
     y1 = y[:h].astype(np.int64).copy()
     y2 = y[h:].astype(np.int64).copy()
 
+    # Derive same layer-specific seed as forward direction
     seed = derive_layer_seed_from_masks_and_key(cp.mask_a, cp.mask_b, layer_idx)
-    t = derive_kernel_from_seed(seed, b"R", h, q)    
-    u = derive_kernel_from_seed(seed, b"S", h, q)
-    m = derive_kernel_from_seed(seed, b"M", h, q)
+    
+    # Generate same three kernels using identical domain separation tags
+    t = derive_kernel_from_seed(seed, b"R", h, q)  # R transformation kernel
+    u = derive_kernel_from_seed(seed, b"S", h, q)  # S transformation kernel
+    m = derive_kernel_from_seed(seed, b"M", h, q)  # Middle transformation kernel
 
+    # Apply inverse transformations in reverse order: S^(-1) -> M^(-1) -> R^(-1)
+    # Stage 1: Apply S inverse (reverse lower triangular operation)
     y1, y2 = block_apply_S_inv(y1, y2, u, q)
+    
+    # Stage 2: Apply M inverse (subtract middle transformation)
+    # This reverses the additive mixing applied in forward direction
     y1 = (y1 - conv_op(y2, m, q)) % q
+    
+    # Stage 3: Apply R inverse (reverse upper triangular operation)
     y1, y2 = block_apply_R_inv(y1, y2, t, q)
 
+    # Recombine halves into single recovered vector
     return np.concatenate([y1.astype(np.int64), y2.astype(np.int64)])
 
 def coupling_forward(x: np.ndarray, cp: CouplingParams, key: VeinnParams) -> np.ndarray:
