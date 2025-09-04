@@ -709,7 +709,7 @@ def coupling_forward_hilbert(x: np.ndarray, cp:CouplingParams, key:VeinnParams, 
     m = derive_kernel_from_seed(seed, b"M", h, q)
 
     y1, y2 = block_apply_R(x1, x2, t, q)
-    y1, y2 = ( y1 + conv_op(y2, m, q) ) % q, y2            
+    y1, y2 = ( y1 + conv_op(y2, m, q) % q, y2)
     y1, y2 = block_apply_S(y1, y2, u, q)
     return np.concatenate([y1.astype(np.int64), y2.astype(np.int64)])
 
