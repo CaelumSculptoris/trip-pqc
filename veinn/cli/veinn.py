@@ -655,11 +655,12 @@ import hashlib
 import numpy as np
 
 # ---- helpers (use the same ones everywhere) ----
-def derive_layer_seed_from_masks_and_key(mask_a: np.ndarray, mask_b: np.ndarray, key, layer_idx: int) -> bytes:
+def derive_layer_seed_from_masks_and_key(mask_a: np.ndarray, mask_b: np.ndarray, layer_idx: int) -> bytes:
     h = hashlib.shake_256()
-    h.update(b"VEINN-HILBERT-SEED-V1")
+    h.update(b"VEINN-HILBERT-SEED")
     h.update(mask_a.tobytes())
-    h.update(mask_b.tobytes())    
+    h.update(mask_b.tobytes())  
+    h.update(layer_idx)    
     return h.digest(32)
 
 def derive_kernel_from_seed(seed: bytes, tag: bytes, h: int, q: int) -> np.ndarray:
@@ -703,7 +704,7 @@ def coupling_forward_hilbert(x: np.ndarray, cp:CouplingParams, key:VeinnParams, 
     x1 = x[:h].astype(np.int64).copy()
     x2 = x[h:].astype(np.int64).copy()
     
-    seed = derive_layer_seed_from_masks_and_key(cp.mask_a, cp.mask_b, key, layer_idx)
+    seed = derive_layer_seed_from_masks_and_key(cp.mask_a, cp.mask_b, layer_idx)
     t = derive_kernel_from_seed(seed, b"R", h, q)
     u = derive_kernel_from_seed(seed, b"S", h, q)
     m = derive_kernel_from_seed(seed, b"M", h, q)
@@ -714,25 +715,21 @@ def coupling_forward_hilbert(x: np.ndarray, cp:CouplingParams, key:VeinnParams, 
     return np.concatenate([y1.astype(np.int64), y2.astype(np.int64)])
 
 def coupling_inverse_hilbert(y: np.ndarray, cp:CouplingParams, key, layer_idx: int) -> np.ndarray:
-    """
-    Inverse of the above: strictly S^{-1} then R^{-1}. Also preserves both halves.
-    Drop-in replacement for your original coupling_inverse inside inverse permute().
-    """
     n = y.shape[0]; h = n // 2; q = key.q
     assert y.shape == (n,)
     y1 = y[:h].astype(np.int64).copy()
     y2 = y[h:].astype(np.int64).copy()
 
-    seed = derive_layer_seed_from_masks_and_key(cp.mask_a, cp.mask_b, key, layer_idx)
+    seed = derive_layer_seed_from_masks_and_key(cp.mask_a, cp.mask_b, layer_idx)
     t = derive_kernel_from_seed(seed, b"R", h, q)    
     u = derive_kernel_from_seed(seed, b"S", h, q)
     m = derive_kernel_from_seed(seed, b"M", h, q)
 
-    x1, x2 = block_apply_S_inv(y1, y2, u, q)
-    y1, y2 = ( (y1 - conv_op(y2, m, q)) % q, y2 )
-    x1, x2 = block_apply_R_inv(x1, x2, t, q)
+    y1, y2 = block_apply_S_inv(y1, y2, u, q)
+    y1 = (y1 - conv_op(y2, m, q)) % q
+    y1, y2 = block_apply_R_inv(y1, y2, t, q)
 
-    return np.concatenate([x1.astype(np.int64), x2.astype(np.int64)])
+    return np.concatenate([y1.astype(np.int64), y2.astype(np.int64)])
 
 def coupling_forward(x: np.ndarray, cp: CouplingParams, key: VeinnParams) -> np.ndarray:
     """
@@ -1056,8 +1053,8 @@ def permute_forward(x: np.ndarray, key: VeinnKey) -> np.ndarray:
     for r in range(vp.rounds):
         # Coupling layers: invertible nonlinear mixing
         for cp in key.rounds[r].cpls:
-            y = coupling_forward(y, cp, vp)
-            #y = coupling_forward_hilbert(y, cp, vp, idx)
+            #y = coupling_forward(y, cp, vp)
+            y = coupling_forward_hilbert(y, cp, vp, idx)
 
         # Invertible element-wise scaling (adds algebraic complexity)
         y = (y.astype(np.int64) * key.rounds[r].ring_scale.astype(np.int64)) % vp.q
@@ -1112,8 +1109,8 @@ def permute_inverse(x: np.ndarray, key: VeinnKey) -> np.ndarray:
         
         # Reverse coupling layers in reverse order
         for cp in reversed(key.rounds[r].cpls):
-            y = coupling_inverse(y, cp, vp)
-            #y = coupling_inverse_hilbert(y, cp, vp, idx)
+            #y = coupling_inverse(y, cp, vp)
+            y = coupling_inverse_hilbert(y, cp, vp, idx)
     return y.astype(np.int64)
 
 # -----------------------------
