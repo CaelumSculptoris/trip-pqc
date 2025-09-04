@@ -599,6 +599,18 @@ def factorize(n):
         factors.add(n)
     return list(factors)
 
+def sample_discrete_gaussian(sigma: float, size: int, t: int) -> np.ndarray:
+    """Sample discrete Gaussian over Z with standard deviation sigma."""
+    result = np.zeros(size, dtype=np.int64)
+    for i in range(size):
+        while True:
+            k = secrets.randbelow(2 * t + 1) - t  # Uniform in [-t, t]
+            prob = math.exp(-k**2 / (2 * sigma**2))
+            if secrets.random() < prob:  # Accept with Gaussian probability
+                result[i] = k % VeinnParams.q
+                break
+    return result
+
 def lwe_prf_expand(seed: bytes, out_n: int, vp: VeinnParams) -> np.ndarray:
     """
     LWE-based Pseudorandom Function for post-quantum key derivation.
@@ -863,7 +875,7 @@ def block_apply_S_inv(y1: np.ndarray, y2: np.ndarray, u: np.ndarray, q: int):
     return ( y1.copy(), (y2 - conv_op(y1, u, q)) % q )
 
 
-def coupling_forward_hilbert(x: np.ndarray, cp: CouplingParams, key: VeinnParams, layer_idx: int) -> np.ndarray:
+def coupling_forward_matrix(x: np.ndarray, cp: CouplingParams, key: VeinnParams, layer_idx: int) -> np.ndarray:
     """
     Forward Hilbert-style coupling transformation with three-stage mixing.
     
@@ -921,7 +933,7 @@ def coupling_forward_hilbert(x: np.ndarray, cp: CouplingParams, key: VeinnParams
     return np.concatenate([y1.astype(np.int64), y2.astype(np.int64)])
 
 
-def coupling_inverse_hilbert(y: np.ndarray, cp: CouplingParams, key, layer_idx: int) -> np.ndarray:
+def coupling_inverse_matrix(y: np.ndarray, cp: CouplingParams, key, layer_idx: int) -> np.ndarray:
     """
     Inverse Hilbert-style coupling transformation.
     
@@ -1300,7 +1312,7 @@ def permute_forward(x: np.ndarray, key: VeinnKey) -> np.ndarray:
         # Coupling layers: invertible nonlinear mixing
         for cp in key.rounds[r].cpls:
             #y = coupling_forward(y, cp, vp)
-            y = coupling_forward_hilbert(y, cp, vp, idx)
+            y = coupling_forward_matrix(y, cp, vp, idx)
 
         # Invertible element-wise scaling (adds algebraic complexity)
         y = (y.astype(np.int64) * key.rounds[r].ring_scale.astype(np.int64)) % vp.q
@@ -1356,7 +1368,7 @@ def permute_inverse(x: np.ndarray, key: VeinnKey) -> np.ndarray:
         # Reverse coupling layers in reverse order
         for cp in reversed(key.rounds[r].cpls):
             #y = coupling_inverse(y, cp, vp)
-            y = coupling_inverse_hilbert(y, cp, vp, idx)
+            y = coupling_inverse_matrix(y, cp, vp, idx)
     return y.astype(np.int64)
 
 # -----------------------------
