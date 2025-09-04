@@ -208,7 +208,5 @@ MIT License
    - Kyber abstraction... You know what I'm going to leave this as an exercise for the reader to implement.
 
 ### TODO
-   - Integrate updates to command line and package.   
-   - Considering swaping ISO 7816 for OAEP.
+   - Integrate updates to command line and package.      
    - Remove unused functions in veinn.py.
-   - Wrapper for Keygen/Encaps/Decaps allowing easy swaping of Kyber/FO

@@ -1616,6 +1616,13 @@ def veinn_kem_keygen(vp: VeinnParams) -> tuple[dict, dict]:
     }
     return pk, sk
 
+def encaps(pk: dict, vp: Optional[VeinnParams] = None, keypair: str = "kyber") -> dict:
+    match keypair:
+        case "kyber":
+            return ML_KEM_768.encaps(pk)
+        case "veinn":
+            return veinn_kem_encaps(pk, vp)
+
 def veinn_kem_encaps(pk: dict, vp: VeinnParams) -> tuple[dict, bytes]:
     """
     VEINN KEM encapsulation using Fujisaki-Okamoto transform.
@@ -1654,6 +1661,13 @@ def veinn_kem_encaps(pk: dict, vp: VeinnParams) -> tuple[dict, bytes]:
     K = shake(32, K_bar + shake(32, json.dumps(c).encode()))
     
     return c, K
+
+def decaps(sk: dict, enc_seed_bytes: Optional[bytes] = None, c: Optional[dict] = None, vp: Optional[VeinnParams] = None, keypair: str = "kyber") -> dict:
+    match keypair:
+        case "kyber":
+            return ML_KEM_768.decaps(sk, enc_seed_bytes)
+        case "veinn":
+            return veinn_kem_decaps(sk, c, vp)
 
 def veinn_kem_decaps(sk: dict, c: dict, vp: VeinnParams) -> bytes:
     """
@@ -1911,6 +1925,13 @@ def bytes_be_to_int(b: bytes) -> int:
     """
     return int.from_bytes(b, 'big')
 
+def generate_keypair(keypair: str = "kyber") -> dict:
+    match keypair:
+        case "kyber":
+            return generate_kyber_keypair()
+        case "veinn":
+            return generate_veinn_keypair()
+
 def generate_kyber_keypair() -> dict:
     """
     Generates a ML-KEM-768 (Kyber) key pair for post-quantum key encapsulation.
@@ -2138,7 +2159,7 @@ def veinn_from_seed(seed_input: str, vp: VeinnParams):
     seed = seed_input.encode('utf-8')
     k = key_from_seed(seed, vp)  # Custom key derivation function
     print(f"Derived VEINN key with params: n={vp.n}, rounds={vp.rounds}, layers_per_round={vp.layers_per_round}, shuffle_stride={vp.shuffle_stride}, use_lwe={vp.use_lwe}")    
-
+    
 def encrypt_with_pub(pubfile: str, file_type: str, message: Optional[str] = None, in_path: Optional[str] = None, vp: VeinnParams = VeinnParams(), seed_len: int = 32, nonce: Optional[bytes] = None, out_file: str = "enc_pub") -> str:
     """
     Implements hybrid encryption using Kyber KEM + Veinn symmetric cipher.
@@ -2150,7 +2171,7 @@ def encrypt_with_pub(pubfile: str, file_type: str, message: Optional[str] = None
     4. Combine both ciphertexts with authentication
     
     Args:
-        pubfile (str): Recipient's Kyber public key file
+        pubfile (str): Recipient's public key file
         file_type (str): Output format (json/bin)
         message (str, optional): Text message to encrypt
         in_path (str, optional): File path to encrypt
@@ -2169,7 +2190,7 @@ def encrypt_with_pub(pubfile: str, file_type: str, message: Optional[str] = None
     - HMAC authentication: Ensures ciphertext integrity and authenticity
     - Ephemeral keys: Fresh symmetric key for each encryption
     """
-    # Load recipient's Kyber public key
+    # Load recipient's public key
     with open(pubfile, "r") as f:
         pub = json.load(f)
     ek = bytes(pub["ek"])  # Encapsulation key
@@ -2192,7 +2213,7 @@ def encrypt_with_pub(pubfile: str, file_type: str, message: Optional[str] = None
     
     # Kyber KEM: Encapsulate ephemeral symmetric key
     # This is the "KEM" part of hybrid encryption
-    ephemeral_seed, ct = ML_KEM_768.encaps(ek)
+    ephemeral_seed, ct = encaps(ek)
 
     # Derive Veinn symmetric key from ephemeral seed
     # This connects the KEM output to symmetric encryption
@@ -2284,7 +2305,7 @@ def decrypt_with_priv(keystore: Optional[str], privfile: Optional[str], encfile:
     
     # Kyber KEM: Decapsulate ephemeral symmetric key
     # This recovers the symmetric key used for message encryption
-    ephemeral_seed = ML_KEM_768.decaps(dk, enc_seed_bytes)
+    ephemeral_seed = decaps(dk, enc_seed_bytes)
     
     # Reconstruct authenticated message for HMAC verification
     msg_for_hmac = enc_seed_bytes + b"".join(block_to_bytes(b) for b in enc_blocks) + math.floor(timestamp).to_bytes(8, 'big')
@@ -2315,7 +2336,10 @@ def decrypt_with_priv(keystore: Optional[str], privfile: Optional[str], encfile:
     # Remove ISO 7816-4 padding to recover original message
     dec_bytes = unpad_iso7816(dec_bytes)
     
-    print("Decrypted message:", dec_bytes.decode('utf-8'))   
+    print("Decrypted message:", dec_bytes.decode('utf-8')) 
+
+    with open("decrypted.txt", "w") as f:
+            json.dump(dec_bytes.decode('utf-8'), f)  
 
 def encrypt_with_public_veinn(seed_input: str, file_type: str, message: Optional[str] = None, in_path: Optional[str] = None, vp: VeinnParams = VeinnParams(), out_file: str = "enc_pub_veinn.json", mode: str = "t", bytes_per_number: Optional[int] = None, nonce: Optional[bytes] = None) -> str:
     """
@@ -2582,7 +2606,7 @@ def options():
     
     Returns:
         Tuple of configured parameters for VEINN construction
-    """
+    """     
     n = int(input(f"Number of {np.int64} words per block (default {VeinnParams.n}): ").strip() or VeinnParams.n)
     rounds = int(input(f"Number of rounds (default {VeinnParams.rounds}): ").strip() or VeinnParams.rounds)
     layers_per_round = int(input(f"Layers per round (default {VeinnParams.layers_per_round}): ").strip() or VeinnParams.layers_per_round)
@@ -2610,7 +2634,7 @@ def menu_generate_keystore():
     keystore_file = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
     create_keystore(passphrase, keystore_file)
 
-def menu_generate_kyber_keypair():
+def menu_generate_keypair():
     """
     Interactive menu for generating Kyber post-quantum key pairs.
     
@@ -2621,7 +2645,7 @@ def menu_generate_kyber_keypair():
     - Post-quantum cryptography: Kyber provides quantum-resistant security
     - Key management: Secure storage options for private keys
     """
-    pubfile = input("Public key filename (default kyber_pub.json): ").strip() or "kyber_pub.json"
+    pubfile = input("Public key filename (default public_key.json): ").strip() or "public_key.json"
     use_keystore = input("Store private key in keystore? (y/n): ").strip().lower() or "y"
     
     privfile, keystore, passphrase, key_name = None, None, None, None
@@ -2630,10 +2654,10 @@ def menu_generate_kyber_keypair():
         passphrase = input("Keystore passphrase: ")
         key_name = input("Key name in keystore: ")
     else:
-        privfile = input("Private key filename (default kyber_priv.json): ").strip() or "kyber_priv.json"
+        privfile = input("Private key filename (default private_key.json): ").strip() or "private_key.json"
     
     # Generate Kyber keypair using ML-KEM-768
-    keypair = generate_kyber_keypair()
+    keypair = generate_keypair()
     
     # Save public key (always in plaintext file)
     with open(pubfile, "w") as f:
@@ -2660,7 +2684,7 @@ def menu_encrypt_with_pub():
     - Post-quantum security: Kyber provides quantum resistance
     - Customizable parameters: Allows cipher tuning
     """
-    pubfile = input("Recipient Kyber public key file (default kyber_pub.json): ").strip() or "kyber_pub.json"
+    pubfile = input("Recipient public key file (default public_key.json): ").strip() or "public_key.json"
     
     if not os.path.exists(pubfile):
         print("Public key not found. Generate Kyber keys first.")
@@ -2703,7 +2727,7 @@ def menu_decrypt_with_priv():
         passphrase = input("Keystore passphrase: ")
         key_name = input("Key name in keystore: ")
     else:
-        privfile = input("Kyber private key file (default kyber_priv.json): ").strip() or "kyber_priv.json"
+        privfile = input("Kyber private key file (default private_key.json): ").strip() or "private_key.json"
     
     encfile = input("Encrypted file to decrypt (default enc_pub): ").strip() or "enc_pub"
     file_type = input("Output file type (JSON/BIN) [json] : ").strip() or "json"
@@ -2837,15 +2861,15 @@ def main():
     create_keystore_parser.add_argument("--passphrase", required=True, help="Keystore passphrase")
     create_keystore_parser.add_argument("--keystore_file", default="keystore.json", help="Keystore filename")
 
-    generate_kyber_parser = subparsers.add_parser("generate_kyber", help="Generate Kyber keypair")
-    generate_kyber_parser.add_argument("--pubfile", default="kyber_pub.json", help="Public key filename")
-    generate_kyber_parser.add_argument("--privfile", default="kyber_priv.json", help="Private key filename")
-    generate_kyber_parser.add_argument("--keystore", default="keystore.json", help="Keystore filename")
-    generate_kyber_parser.add_argument("--passphrase", help="Keystore passphrase")
-    generate_kyber_parser.add_argument("--key_name", help="Key name in keystore")
+    generate_parser = subparsers.add_parser("generate_kyber", help="Generate Kyber keypair")
+    generate_parser.add_argument("--pubfile", default="public_key.json", help="Public key filename")
+    generate_parser.add_argument("--privfile", default="private_key.json", help="Private key filename")
+    generate_parser.add_argument("--keystore", default="keystore.json", help="Keystore filename")
+    generate_parser.add_argument("--passphrase", help="Keystore passphrase")
+    generate_parser.add_argument("--key_name", help="Key name in keystore")
 
     public_encrypt_parser = subparsers.add_parser("public_encrypt", help="Encrypt with Kyber public key")
-    public_encrypt_parser.add_argument("--pubfile", default="kyber_pub.json", help="Kyber public key file")
+    public_encrypt_parser.add_argument("--pubfile", default="public_key.json", help="Kyber public key file")
     public_encrypt_parser.add_argument("--in_path", help="Input file path")
     public_encrypt_parser.add_argument("--mode", choices=["t", "n"], default="t", help="Input mode")
     public_encrypt_parser.add_argument("--n", type=int, default=VeinnParams.n)
@@ -2860,7 +2884,7 @@ def main():
 
     public_decrypt_parser = subparsers.add_parser("public_decrypt", help="Decrypt with Kyber private key")
     public_decrypt_parser.add_argument("--keystore", default="keystore.json")
-    public_decrypt_parser.add_argument("--privfile", default="kyber_priv.json")
+    public_decrypt_parser.add_argument("--privfile", default="private_key.json")
     public_decrypt_parser.add_argument("--encfile", default="enc_pub.json")
     public_decrypt_parser.add_argument("--passphrase")
     public_decrypt_parser.add_argument("--key_name")
@@ -2883,7 +2907,7 @@ def main():
                 create_keystore(args.passphrase, args.keystore_file)
                 print(f"Keystore created: {args.keystore_file}")
             case "generate_kyber":
-                keypair = generate_kyber_keypair()
+                keypair = generate_keypair()
                 with open(args.pubfile, "w") as f:
                     json.dump({"ek": keypair["ek"]}, f)
                 if args.keystore and args.passphrase and args.key_name:
@@ -2938,12 +2962,12 @@ def main():
                     print(f"{bcolors.GREY}{bcolors.BOLD}(]≡≡≡≡ø‡»{bcolors.OKCYAN}========================================-{bcolors.ENDC}")
                     print("")
                     print(f"{bcolors.BOLD}1){bcolors.ENDC} Create encrypted keystore")
-                    print(f"{bcolors.BOLD}2){bcolors.ENDC} Generate Kyber keypair (public/private)")
-                    print(f"{bcolors.BOLD}3){bcolors.ENDC} Encrypt with recipient public key (Kyber + VEINN)")
+                    print(f"{bcolors.BOLD}2){bcolors.ENDC} Generate keypair (public/private)")
+                    print(f"{bcolors.BOLD}3){bcolors.ENDC} Encrypt with recipient public key")
                     print(f"{bcolors.BOLD}4){bcolors.ENDC} Decrypt with private key")
                     print(f"{bcolors.BOLD}5){bcolors.ENDC} Encrypt deterministically using public VEINN")
                     print(f"{bcolors.BOLD}6){bcolors.ENDC} Decrypt deterministically using public VEINN")
-                    print(f"{bcolors.GREY}7) Derive public VEINN from seed{bcolors.ENDC}")
+                    print(f"{bcolors.BOLD}7){bcolors.ENDC} Derive public VEINN from seed")
                     print(f"{bcolors.BOLD}0){bcolors.ENDC} Exit")
                     choice = input(f"{bcolors.BOLD}Choice: {bcolors.ENDC}").strip()
                     try:
@@ -2953,7 +2977,7 @@ def main():
                             case "1":
                                 menu_generate_keystore()
                             case "2":
-                                menu_generate_kyber_keypair()
+                                menu_generate_keypair()
                             case "3":
                                 menu_encrypt_with_pub()
                             case "4":
