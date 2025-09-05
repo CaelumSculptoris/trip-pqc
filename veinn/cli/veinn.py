@@ -599,17 +599,29 @@ def factorize(n):
         factors.add(n)
     return list(factors)
 
-def sample_discrete_gaussian(sigma: float, size: int, t: int) -> np.ndarray:
-    """Sample discrete Gaussian over Z with standard deviation sigma."""
-    result = np.zeros(size, dtype=np.int64)
-    for i in range(size):
-        while True:
-            k = secrets.randbelow(2 * t + 1) - t  # Uniform in [-t, t]
-            prob = math.exp(-k**2 / (2 * sigma**2))
-            if secrets.random() < prob:  # Accept with Gaussian probability
-                result[i] = k % VeinnParams.q
-                break
-    return result
+def sample_binomial(k: int, size: int, q: int) -> np.ndarray:
+    """
+    Sample centered binomial distribution for VEINN's integer system.
+    
+    Generates integers approximating a Gaussian with sigma = sqrt(k/2).
+    Matches Kyber's error sampling for PQ security.
+    
+    Args:
+        k: Number of bit pairs (e.g., 8 for sigma ≈ 2)
+        size: Number of samples (e.g., n=512)
+        q: Modulus (e.g., 1049089)
+    
+    Returns:
+        np.ndarray: Array of size integers in [-k, k], reduced mod q
+    """
+    # Need k bits per sample, size samples, split into a and b
+    num_bytes = size * k // 8 + (1 if size * k % 8 else 0)
+    bits = np.frombuffer(secrets.token_bytes(num_bytes), dtype=np.uint8)[:size * k] & 1
+    # Reshape into size x k for a and b
+    a = bits[::2][:size * k//2].reshape(size, k//2).sum(axis=1)
+    b = bits[1::2][:size * k//2].reshape(size, k//2).sum(axis=1)
+    samples = (a - b).astype(np.int64)
+    return samples % q
 
 def lwe_prf_expand(seed: bytes, out_n: int, vp: VeinnParams) -> np.ndarray:
     """
@@ -642,8 +654,9 @@ def lwe_prf_expand(seed: bytes, out_n: int, vp: VeinnParams) -> np.ndarray:
     
     # Sample small error from discrete Gaussian approximation
     raw = shake(n, seed, b"e")
-    e = np.frombuffer(raw, dtype=np.uint8)[:n].astype(np.int64)
-    e = ((e % 9) - 4).astype(np.int64) % vp.q  # Small error in [-4, 4]
+    e = np.frombuffer(raw, dtype=np.uint8)[:n].astype(np.int64)    
+    e = ((e % 9) - 4).astype(np.int64) % vp.q  # Small error in [-4, 4]    
+    #e = sample_binomial(k=8, size=n, q=vp.q)
     
     # Validate dimensions for Ring-LWE structure
     assert s.shape == (n,) and a.shape == (n,) and e.shape == (n,), f"LWE parameter shape mismatch{e.shape, a.shape, s.shape}"
@@ -2873,17 +2886,17 @@ def main():
     create_keystore_parser.add_argument("--passphrase", required=True, help="Keystore passphrase")
     create_keystore_parser.add_argument("--keystore_file", default="keystore.json", help="Keystore filename")
 
-    generate_parser = subparsers.add_parser("generate_kyber", help="Generate Kyber keypair")
+    generate_parser = subparsers.add_parser("generate_keypair", help="Generate keypair")
     generate_parser.add_argument("--pubfile", default="public_key.json", help="Public key filename")
     generate_parser.add_argument("--privfile", default="private_key.json", help="Private key filename")
     generate_parser.add_argument("--keystore", default="keystore.json", help="Keystore filename")
     generate_parser.add_argument("--passphrase", help="Keystore passphrase")
     generate_parser.add_argument("--key_name", help="Key name in keystore")
 
-    public_encrypt_parser = subparsers.add_parser("public_encrypt", help="Encrypt with Kyber public key")
-    public_encrypt_parser.add_argument("--pubfile", default="public_key.json", help="Kyber public key file")
+    public_encrypt_parser = subparsers.add_parser("public_encrypt", help="Encrypt with public key")
+    public_encrypt_parser.add_argument("--pubfile", default="public_key.json", help="Public key file")
     public_encrypt_parser.add_argument("--in_path", help="Input file path")
-    public_encrypt_parser.add_argument("--mode", choices=["t", "n"], default="t", help="Input mode")
+    public_encrypt_parser.add_argument("--file_type", choices=["json", "bin"], default="json", help="File type [JSON/BIN]")
     public_encrypt_parser.add_argument("--n", type=int, default=VeinnParams.n)
     public_encrypt_parser.add_argument("--rounds", type=int, default=VeinnParams.rounds)
     public_encrypt_parser.add_argument("--layers_per_round", type=int, default=VeinnParams.layers_per_round)
@@ -2892,14 +2905,15 @@ def main():
     public_encrypt_parser.add_argument("--q", type=int, default=VeinnParams.q)
     public_encrypt_parser.add_argument("--seed_len", type=int, default=32)
     public_encrypt_parser.add_argument("--nonce", help="Custom nonce (base64)")
-    public_encrypt_parser.add_argument("--out_file", default="enc_pub.json")
+    public_encrypt_parser.add_argument("--out_file", default="enc_pub")
 
-    public_decrypt_parser = subparsers.add_parser("public_decrypt", help="Decrypt with Kyber private key")
+    public_decrypt_parser = subparsers.add_parser("public_decrypt", help="Decrypt with private key")
     public_decrypt_parser.add_argument("--keystore", default="keystore.json")
     public_decrypt_parser.add_argument("--privfile", default="private_key.json")
     public_decrypt_parser.add_argument("--encfile", default="enc_pub.json")
     public_decrypt_parser.add_argument("--passphrase")
     public_decrypt_parser.add_argument("--key_name")
+    public_decrypt_parser.add_argument("--file_type", default="json")
     public_decrypt_parser.add_argument("--validity_window", type=int, default=3600)
 
     public_veinn_parser = subparsers.add_parser("public_veinn", help="Derive public VEINN from seed")
@@ -2918,7 +2932,7 @@ def main():
             case "create_keystore":
                 create_keystore(args.passphrase, args.keystore_file)
                 print(f"Keystore created: {args.keystore_file}")
-            case "generate_kyber":
+            case "generate_keypair":
                 keypair = generate_keypair()
                 with open(args.pubfile, "w") as f:
                     json.dump({"ek": keypair["ek"]}, f)
@@ -2940,9 +2954,9 @@ def main():
                 )
                 nonce = b64decode(args.nonce) if args.nonce else None
                 encrypt_with_pub(
-                    args.pubfile,
-                    in_path=args.in_path,
-                    mode=args.mode,
+                    pubfile=args.pubfile,
+                    file_type=args.file_type,
+                    in_path=args.in_path,                    
                     vp=vp,
                     seed_len=args.seed_len,
                     nonce=nonce,
@@ -2950,12 +2964,13 @@ def main():
                 )
             case "public_decrypt":
                 decrypt_with_priv(
-                    args.keystore,
-                    args.privfile,
-                    args.encfile,
-                    args.passphrase,
-                    args.key_name,
-                    args.validity_window
+                    keystore=args.keystore,
+                    privfile=args.privfile,
+                    encfile=args.encfile,
+                    passphrase=args.passphrase,
+                    key_name=args.key_name,
+                    file_type=args.file_type,
+                    validity_window=args.validity_window
                 )
             case "public_veinn":
                 vp = VeinnParams(
@@ -2987,7 +3002,7 @@ def main():
                             case "0":
                                 break
                             case "1":
-                                menu_generate_keystore()
+                                menu_generate_keystore()                                
                             case "2":
                                 menu_generate_keypair()
                             case "3":
