@@ -2263,7 +2263,8 @@ def encrypt_with_pub(pubfile: str, file_type: str, message: Optional[str] = None
         "layers_per_round": vp.layers_per_round,
         "shuffle_stride": vp.shuffle_stride,
         "use_lwe": vp.use_lwe,
-        "bytes_per_number": vp.n * 2
+        #"chaining_mode": mode,  # Store the chaining mode
+        "bytes_per_number": vp.n * 2        
     }
     
     # Add timestamp for replay attack prevention
@@ -2616,6 +2617,501 @@ def read_ciphertext(path: str, file_type: str):
     
     return metadata, enc_seed, enc_blocks, hmac_value, nonce, timestamp
 
+def encrypt_with_pub_cbc(pubfile: str, file_type: str, message: Optional[str] = None, in_path: Optional[str] = None, vp: VeinnParams = VeinnParams(), seed_len: int = 32, nonce: Optional[bytes] = None, out_file: str = "enc_pub", mode: str = "cbc") -> str:
+    """
+    Enhanced hybrid encryption with proper block chaining modes.
+    
+    Supports multiple chaining modes:
+    - CBC: Cipher Block Chaining (XOR previous ciphertext with current plaintext)
+    - CTR: Counter mode (encrypt counter + nonce, XOR with plaintext)
+    - CFB: Cipher Feedback (encrypt previous ciphertext, XOR with plaintext)
+    
+    This fixes the ECB vulnerability by ensuring each block depends on previous blocks.
+    """
+    # Load recipient's public key
+    with open(pubfile, "r") as f:
+        pub = json.load(f)
+    ek = bytes(pub["ek"])
+
+    # Prepare message data
+    if in_path:
+        with open(in_path, "rb") as f:
+            message_bytes = f.read()
+    else:
+        if not message:
+            raise ValueError(f"{bcolors.FAIL}Message required for text mode{bcolors.ENDC}")
+        message_bytes = message.encode('utf-8')
+
+    # Apply padding
+    message_bytes = pad_iso7816(message_bytes, vp.n * 2)
+    
+    # Generate random nonce/IV
+    nonce = nonce or secrets.token_bytes(16)
+    
+    # Kyber KEM: Encapsulate ephemeral symmetric key
+    ephemeral_seed, ct = encaps(ek)
+    k = key_from_seed(ephemeral_seed, vp)
+    
+    # Split message into blocks
+    blocks = [bytes_to_block(message_bytes[i:i + vp.n * 2], vp.n) 
+              for i in range(0, len(message_bytes), vp.n * 2)]
+    
+    # Encrypt blocks using selected chaining mode
+    if mode == "cbc":
+        enc_blocks = encrypt_blocks_cbc(blocks, k, nonce, vp)
+    elif mode == "ctr":
+        enc_blocks = encrypt_blocks_ctr(blocks, k, nonce, vp)
+    elif mode == "cfb":
+        enc_blocks = encrypt_blocks_cfb(blocks, k, nonce, vp)
+    else:
+        raise ValueError(f"Unsupported chaining mode: {mode}")
+
+    # Store encryption metadata
+    metadata = {
+        "n": vp.n,
+        "rounds": vp.rounds,
+        "layers_per_round": vp.layers_per_round,
+        "shuffle_stride": vp.shuffle_stride,
+        "use_lwe": vp.use_lwe,
+        "chaining_mode": mode,  # Store the chaining mode
+        "bytes_per_number": vp.n * 2
+    }
+    
+    # Add timestamp and authentication
+    timestamp = time.time()
+    msg_for_hmac = ct + b"".join(block_to_bytes(b) for b in enc_blocks) + math.floor(timestamp).to_bytes(8, 'big')
+    hmac_value = hmac.new(ephemeral_seed, msg_for_hmac, hashlib.sha256).hexdigest()
+    
+    # Write ciphertext
+    out_file = out_file + "." + file_type
+    write_ciphertext_with_iv(out_file, file_type, enc_blocks, metadata, ct, hmac_value, nonce, timestamp)
+    return out_file
+
+
+def encrypt_blocks_cbc(blocks: list, key: VeinnKey, iv: bytes, vp: VeinnParams) -> list:
+    """
+    Cipher Block Chaining (CBC) mode encryption.
+    
+    CBC Mode: C[i] = Encrypt(P[i] ⊕ C[i-1]), where C[0] = IV
+    
+    Each plaintext block is XORed with the previous ciphertext block before encryption.
+    This creates interdependence between blocks, fixing the ECB vulnerability.
+    
+    Security properties:
+    - Bit changes propagate to all subsequent blocks
+    - Identical plaintext blocks produce different ciphertext
+    - Requires IV for first block (stored with ciphertext)
+    """
+    if not blocks:
+        return []
+    
+    # Convert IV to block format for XOR
+    iv_block = bytes_to_block(iv.ljust(vp.n * 2, b'\x00'), vp.n)
+    
+    encrypted_blocks = []
+    prev_ciphertext = iv_block  # Start with IV
+    
+    for i, plaintext_block in enumerate(blocks):
+        # CBC: XOR plaintext with previous ciphertext
+        chained_input = (plaintext_block ^ prev_ciphertext) % vp.q
+        
+        # Encrypt the chained input
+        ciphertext_block = permute_forward(chained_input, key)
+        encrypted_blocks.append(ciphertext_block)
+        
+        # Update previous ciphertext for next iteration
+        prev_ciphertext = ciphertext_block
+    
+    return encrypted_blocks
+
+
+def decrypt_blocks_cbc(enc_blocks: list, key: VeinnKey, iv: bytes, vp: VeinnParams) -> list:
+    """
+    CBC mode decryption: P[i] = Decrypt(C[i]) ⊕ C[i-1]
+    """
+    if not enc_blocks:
+        return []
+    
+    iv_block = bytes_to_block(iv.ljust(vp.n * 2, b'\x00'), vp.n)
+    
+    decrypted_blocks = []
+    prev_ciphertext = iv_block
+    
+    for ciphertext_block in enc_blocks:
+        # Decrypt the ciphertext
+        decrypted_intermediate = permute_inverse(ciphertext_block, key)
+        
+        # XOR with previous ciphertext to get plaintext
+        plaintext_block = (decrypted_intermediate ^ prev_ciphertext) % vp.q
+        decrypted_blocks.append(plaintext_block)
+        
+        # Update for next iteration
+        prev_ciphertext = ciphertext_block
+    
+    return decrypted_blocks
+
+
+def encrypt_blocks_ctr(blocks: list, key: VeinnKey, nonce: bytes, vp: VeinnParams) -> list:
+    """
+    Counter (CTR) mode encryption.
+    
+    CTR Mode: C[i] = P[i] ⊕ Encrypt(Nonce || Counter[i])
+    
+    Encrypts a counter value and XORs with plaintext. This creates a stream cipher
+    from a block cipher. Each block uses a different counter value.
+    
+    Security properties:
+    - Parallel encryption/decryption possible
+    - No error propagation between blocks
+    - Requires unique nonce for each message
+    """
+    encrypted_blocks = []
+    
+    for i, plaintext_block in enumerate(blocks):
+        # Create counter block: nonce + block index
+        counter_bytes = nonce + i.to_bytes(8, 'big')
+        counter_block = bytes_to_block(counter_bytes.ljust(vp.n * 2, b'\x00'), vp.n)
+        
+        # Encrypt counter to create keystream
+        keystream_block = permute_forward(counter_block, key)
+        
+        # XOR plaintext with keystream
+        ciphertext_block = (plaintext_block ^ keystream_block) % vp.q
+        encrypted_blocks.append(ciphertext_block)
+    
+    return encrypted_blocks
+
+
+def decrypt_blocks_ctr(enc_blocks: list, key: VeinnKey, nonce: bytes, vp: VeinnParams) -> list:
+    """
+    CTR mode decryption (identical to encryption due to XOR properties)
+    """
+    return encrypt_blocks_ctr(enc_blocks, key, nonce, vp)  # CTR is symmetric
+
+
+def encrypt_blocks_cfb(blocks: list, key: VeinnKey, iv: bytes, vp: VeinnParams) -> list:
+    """
+    Cipher Feedback (CFB) mode encryption.
+    
+    CFB Mode: C[i] = P[i] ⊕ Encrypt(C[i-1]), where C[0] = IV
+    
+    Encrypts the previous ciphertext block and XORs with current plaintext.
+    Creates a self-synchronizing stream cipher.
+    
+    Security properties:
+    - Error recovery after one block
+    - Sequential operation required
+    - Bit errors in ciphertext cause limited plaintext corruption
+    """
+    if not blocks:
+        return []
+    
+    iv_block = bytes_to_block(iv.ljust(vp.n * 2, b'\x00'), vp.n)
+    
+    encrypted_blocks = []
+    feedback_register = iv_block  # Start with IV
+    
+    for plaintext_block in blocks:
+        # Encrypt the feedback register
+        keystream_block = permute_forward(feedback_register, key)
+        
+        # XOR plaintext with keystream to get ciphertext
+        ciphertext_block = (plaintext_block ^ keystream_block) % vp.q
+        encrypted_blocks.append(ciphertext_block)
+        
+        # Update feedback register with current ciphertext
+        feedback_register = ciphertext_block
+    
+    return encrypted_blocks
+
+
+def decrypt_blocks_cfb(enc_blocks: list, key: VeinnKey, iv: bytes, vp: VeinnParams) -> list:
+    """
+    CFB mode decryption: P[i] = C[i] ⊕ Encrypt(C[i-1])
+    """
+    if not enc_blocks:
+        return []
+    
+    iv_block = bytes_to_block(iv.ljust(vp.n * 2, b'\x00'), vp.n)
+    
+    decrypted_blocks = []
+    feedback_register = iv_block
+    
+    for ciphertext_block in enc_blocks:
+        # Encrypt the feedback register
+        keystream_block = permute_forward(feedback_register, key)
+        
+        # XOR ciphertext with keystream to get plaintext
+        plaintext_block = (ciphertext_block ^ keystream_block) % vp.q
+        decrypted_blocks.append(plaintext_block)
+        
+        # Update feedback register with current ciphertext
+        feedback_register = ciphertext_block
+    
+    return decrypted_blocks
+
+
+def decrypt_with_priv_chained(keystore: Optional[str], privfile: Optional[str], encfile: str, 
+                             passphrase: Optional[str], key_name: Optional[str], 
+                             file_type: str, validity_window: int):
+    """
+    Enhanced decryption function that supports chained block modes.
+    """
+    # Load private key
+    if keystore and passphrase and key_name:
+        privkey = retrieve_key_from_keystore(passphrase, key_name, keystore)
+    else:
+        with open(privfile, "r") as f:
+            privkey = json.load(f)
+    
+    dk = bytes(privkey["dk"])
+    
+    # Read ciphertext with IV
+    metadata, enc_seed_bytes, enc_blocks, hmac_value, iv, timestamp = read_ciphertext_with_iv(encfile, file_type)
+    
+    # Timestamp validation
+    if not validate_timestamp(timestamp, validity_window):
+        raise ValueError(f"{bcolors.FAIL}Timestamp outside validity window{bcolors.ENDC}")
+    
+    # Kyber decapsulation
+    ephemeral_seed = decaps(dk, enc_seed_bytes)
+    
+    # HMAC verification
+    msg_for_hmac = enc_seed_bytes + b"".join(block_to_bytes(b) for b in enc_blocks) + math.floor(timestamp).to_bytes(8, 'big')
+    if not hmac.compare_digest(hmac.new(ephemeral_seed, msg_for_hmac, hashlib.sha256).hexdigest(), hmac_value):
+        raise ValueError(f"{bcolors.FAIL}HMAC verification failed{bcolors.ENDC}")
+    
+    # Reconstruct parameters
+    vp = VeinnParams(
+        n=metadata["n"],
+        rounds=metadata["rounds"],
+        layers_per_round=metadata["layers_per_round"],
+        shuffle_stride=metadata["shuffle_stride"],
+        use_lwe=metadata["use_lwe"]
+    )
+    
+    k = key_from_seed(ephemeral_seed, vp)
+    
+    # Decrypt using appropriate chaining mode
+    chaining_mode = metadata.get("chaining_mode", "ecb")  # Default to ECB for backwards compatibility
+    
+    if chaining_mode == "cbc":
+        dec_blocks = decrypt_blocks_cbc(enc_blocks, k, iv, vp)
+    elif chaining_mode == "ctr":
+        dec_blocks = decrypt_blocks_ctr(enc_blocks, k, iv, vp)
+    elif chaining_mode == "cfb":
+        dec_blocks = decrypt_blocks_cfb(enc_blocks, k, iv, vp)
+    else:
+        # Legacy ECB mode (independent block decryption)
+        dec_blocks = [permute_inverse(b, k) for b in enc_blocks]
+    
+    # Reconstruct message
+    dec_bytes = b"".join(block_to_bytes(b) for b in dec_blocks)
+    dec_bytes = unpad_iso7816(dec_bytes)
+    
+    print("Decrypted message:", dec_bytes.decode('utf-8'))
+    
+    with open("decrypted.txt", "w") as f:
+        json.dump(dec_bytes.decode('utf-8'), f)
+
+
+def write_ciphertext_with_iv(path: str, file_type: str, encrypted_blocks: list, metadata: dict, 
+                            enc_seed_bytes: bytes, hmac_value: str, iv: bytes, timestamp: float):
+    """
+    Enhanced serialization that includes IV/nonce for chained modes.
+    """
+    key = {
+        "veinn_metadata": metadata,
+        "enc_seed_b64": b64encode(enc_seed_bytes).decode(),
+        "hmac": hmac_value,
+        "iv_b64": b64encode(iv).decode(),  # Store IV separately
+        "timestamp": timestamp
+    }
+    
+    with open("key_" + path, "w") as f:
+        json.dump(key, f)
+
+    if file_type == "json":
+        payload = {
+            "encrypted": [[int(x) for x in blk.tolist()] for blk in encrypted_blocks]
+        }
+        with open(path, "w") as f:
+            json.dump(payload, f)
+    elif file_type == "bin":
+        with open(path, "wb") as f:
+            f.write(b"VEINN")
+            f.write(len(encrypted_blocks).to_bytes(4, 'big'))
+            for blk in encrypted_blocks:
+                f.write(blk.tobytes())
+
+
+def read_ciphertext_with_iv(path: str, file_type: str):
+    """
+    Enhanced deserialization that reads IV for chained modes.
+    """
+    with open("key_" + path, "r") as f:
+        key = json.load(f)
+        hmac_value = key["hmac"]
+        iv = b64decode(key["iv_b64"])  # Read IV
+        timestamp = key["timestamp"]
+        enc_seed = b64decode(key["enc_seed_b64"])
+        metadata = key["veinn_metadata"]
+
+    if file_type == "json":
+        with open(path, "r") as f:
+            encrypted = json.load(f)
+        enc_blocks = [np.array([int(x) for x in blk], dtype=np.int64) for blk in encrypted["encrypted"]]
+    elif file_type == "bin":
+        with open(path, "rb") as f:
+            magic = f.read(5)
+            if magic != b"VEINN":
+                raise ValueError("Invalid file format")
+            num_blocks = int.from_bytes(f.read(4), 'big')
+            n = metadata["n"]
+            enc_blocks = []
+            for _ in range(num_blocks):
+                block_data = f.read(n * 8)
+                block = np.frombuffer(block_data, dtype=np.int64)
+                enc_blocks.append(block)
+    
+    return metadata, enc_seed, enc_blocks, hmac_value, iv, timestamp
+
+
+def test_chaining_modes_avalanche(vp: VeinnParams, message_sizes: list = [500, 1500, 3000], num_tests: int = 5):
+    """
+    Compare avalanche effects across different chaining modes and message sizes.
+    
+    This test verifies that the chaining modes fix the ECB vulnerability by
+    ensuring bit changes propagate across block boundaries.
+    """
+    print("Chaining Modes Avalanche Comparison")
+    print("=" * 60)
+    
+    modes = ["ecb", "cbc", "ctr", "cfb"]
+    results = {}
+    
+    # Generate test keypair
+    test_keypair = generate_keypair()
+    ek = bytes(test_keypair["ek"])
+    
+    for mode in modes:
+        print(f"\nTesting {mode.upper()} mode:")
+        print("-" * 30)
+        results[mode] = {}
+        
+        for msg_size in message_sizes:
+            print(f"  {msg_size} bytes...", end=" ", flush=True)
+            
+            # Generate random test message
+            test_message = secrets.token_bytes(msg_size)
+            
+            # Test bit flips
+            bit_changes = []
+            total_bits = msg_size * 8
+            num_bit_tests = min(50, total_bits)  # Sample for performance
+            bit_positions = np.random.choice(total_bits, size=num_bit_tests, replace=False)
+            
+            # Encrypt original message
+            if mode == "ecb":
+                original_encrypted = encrypt_message_ecb_test(test_message, ek, vp)
+            else:
+                original_encrypted = encrypt_message_chained_test(test_message, ek, vp, mode)
+            
+            for bit_pos in bit_positions:
+                # Flip bit and encrypt
+                modified_message = flip_bit(test_message, bit_pos)
+                
+                if mode == "ecb":
+                    modified_encrypted = encrypt_message_ecb_test(modified_message, ek, vp)
+                else:
+                    modified_encrypted = encrypt_message_chained_test(modified_message, ek, vp, mode)
+                
+                # Calculate Hamming distance
+                bit_diff = hamming_distance_bits(original_encrypted, modified_encrypted)
+                bit_changes.append(bit_diff)
+            
+            # Calculate statistics
+            avg_bit_changes = np.mean(bit_changes)
+            total_output_bits = len(original_encrypted) * 8
+            avalanche_pct = (avg_bit_changes / total_output_bits) * 100
+            
+            results[mode][msg_size] = {
+                'avalanche_percentage': avalanche_pct,
+                'avg_bits_changed': avg_bit_changes,
+                'total_output_bits': total_output_bits
+            }
+            
+            print(f"{avalanche_pct:.1f}% avalanche")
+    
+    # Print comparison table
+    print(f"\nAvalanche Comparison Table:")
+    print("-" * 60)
+    print(f"{'Mode':<6}", end="")
+    for size in message_sizes:
+        print(f"{size:>10}B", end="")
+    print()
+    print("-" * 60)
+    
+    for mode in modes:
+        print(f"{mode.upper():<6}", end="")
+        for size in message_sizes:
+            pct = results[mode][size]['avalanche_percentage']
+            if pct < 40:
+                color = bcolors.FAIL
+            elif pct > 45:
+                color = bcolors.OKGREEN
+            else:
+                color = bcolors.WARNING
+            print(f"{color}{pct:>9.1f}%{bcolors.ENDC}", end="")
+        print()
+    
+    print("\nInterpretation:")
+    print("- ECB mode should show poor avalanche for multi-block messages")
+    print("- CBC, CTR, CFB should show ~50% avalanche across all sizes")
+    print("- Values <40% indicate security concerns")
+    print("- Values >45% indicate good diffusion properties")
+    
+    return results
+
+
+def encrypt_message_ecb_test(message: bytes, ek: bytes, vp: VeinnParams) -> bytes:
+    """Test helper: ECB mode encryption (original vulnerable method)"""
+    padded_message = pad_iso7816(message, vp.n * 2)
+    ephemeral_seed, ct_kem = encaps(ek)
+    k = key_from_seed(ephemeral_seed, vp)
+    
+    encrypted_blocks = []
+    for i in range(0, len(padded_message), vp.n * 2):
+        block_bytes = padded_message[i:i + vp.n * 2]
+        block_array = bytes_to_block(block_bytes, vp.n)
+        encrypted_block = permute_forward(block_array, k)  # Independent encryption
+        encrypted_blocks.append(block_to_bytes(encrypted_block))
+    
+    return ct_kem + b''.join(encrypted_blocks)
+
+
+def encrypt_message_chained_test(message: bytes, ek: bytes, vp: VeinnParams, mode: str) -> bytes:
+    """Test helper: Chained mode encryption"""
+    padded_message = pad_iso7816(message, vp.n * 2)
+    ephemeral_seed, ct_kem = encaps(ek)
+    k = key_from_seed(ephemeral_seed, vp)
+    iv = secrets.token_bytes(16)
+    
+    blocks = [bytes_to_block(padded_message[i:i + vp.n * 2], vp.n) 
+              for i in range(0, len(padded_message), vp.n * 2)]
+    
+    if mode == "cbc":
+        enc_blocks = encrypt_blocks_cbc(blocks, k, iv, vp)
+    elif mode == "ctr":
+        enc_blocks = encrypt_blocks_ctr(blocks, k, iv, vp)
+    elif mode == "cfb":
+        enc_blocks = encrypt_blocks_cfb(blocks, k, iv, vp)
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+    
+    encrypted_data = b''.join(block_to_bytes(b) for b in enc_blocks)
+    return ct_kem + iv + encrypted_data
+
 # -----------------------------
 # Interactive Configuration Helpers  
 # -----------------------------
@@ -2717,7 +3213,13 @@ def menu_encrypt_with_pub():
     if not os.path.exists(pubfile):
         print("Public key not found. Generate Kyber keys first.")
         return
-        
+    
+    print("Supports multiple chaining modes:")
+    print("- CBC: Cipher Block Chaining (XOR previous ciphertext with current plaintext)")
+    print("- CTR: Counter mode (encrypt counter + nonce, XOR with plaintext)")
+    print("- CFB: Cipher Feedback (encrypt previous ciphertext, XOR with plaintext)")
+    mode = input("Choose cbc, ctr, or cfb [cbc] : ").strip() or "cbc"
+    
     inpath = input("Optional input file path (blank = prompt): ").strip() or None    
     file_type = input("Output file type (JSON/BIN) [json] : ").strip() or "json"
     
@@ -2733,7 +3235,7 @@ def menu_encrypt_with_pub():
     if inpath is None:        
         message = input("Message to encrypt: ")        
     
-    encrypt_with_pub(pubfile, file_type, message=message, in_path=inpath, vp=vp, seed_len=seed_len, nonce=nonce)
+    encrypt_with_pub_cbc(pubfile, file_type, message=message, in_path=inpath, vp=vp, seed_len=seed_len, nonce=nonce, mode=mode)
 
 def menu_decrypt_with_priv():
     """
@@ -2766,7 +3268,7 @@ def menu_decrypt_with_priv():
         print("Encrypted file not found.")
         return
         
-    decrypt_with_priv(keystore, privfile, encfile, passphrase, key_name, file_type, validity_window)
+    decrypt_with_priv_chained(keystore, privfile, encfile, passphrase, key_name, file_type, validity_window)
 
 def menu_veinn_from_seed():
     """

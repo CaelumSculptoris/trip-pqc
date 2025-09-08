@@ -198,13 +198,14 @@ It is not yet standardized, audited, or production-ready. Use at your own risk.
 MIT License
 
 ## Notes   
-   - Full pipeline test added.
+   - Avalanche test shows good single block obfuscation but poor multiblock obfuscation. Implemented block chaining.
 
 ### Updates   
-   - Updated avalanche test
+   - Added chaining modes.
 
 ### TODO
    - Update package
+   - Integrate block chaining avalanche tests
    
 
 ### Avalanche Test Results
