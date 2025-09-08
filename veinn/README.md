@@ -197,16 +197,65 @@ It is not yet standardized, audited, or production-ready. Use at your own risk.
 
 MIT License
 
-## Notes
-   - Baked in Fujisaki-Okamoto transforms to abstract Kyber out requires more time, will revist. Refactor and clean up now prioritized.
-
-### Vector Space Notes
-   The Hilbert implementation (coupling_forward_hilbert and coupling_inverse_hilbert) composing block transformations (R, the middle m-convolution, and S) that resemble a 2x2 block matrix over the polynomial ring. This gives it a tensor-product flavor, as you’re essentially operating in a module over the ring (treating each half as a vector in the ring’s “vector space”), with the convolutions acting as ring multiplications. The pseudorandom kernels (t, u, m derived from SHAKE-256 seeds) introduce far more variability and local mixing compared to the fixed all-ones in the non-Hilbert version—changes don’t just add uniforms but spread irregularly via full circulant matrices, making the projection of plaintext into this space much harder to reverse-engineer or approximate. The extra m term adds another layer of coupling, effectively composing more ring operations, which enhances diffusion without sacrificing invertibility.
+## Notes   
 
 ### Updates   
-   - Fixed experimental "Hilbert" space coupling functions.
-   - Kyber abstraction... You know what I'm going to leave this as an exercise for the reader to implement.
+   - We're getting great word level, but poor bit level avalanche. Considering implementing bit shift during permutation. Currently looking into padding issues whi
 
 ### TODO
-   - Integrate updates to command line and package.      
-   - Remove unused functions in veinn.py.
+   - Fix padding
+   - Implement bit shift
+
+### Avalanche Test Results
+Avalanche Test Results:
+------------------------------
+Bit-level avalanche: 15.62% ± 0.01%
+Word-level avalanche: 100.00% ± 0.00%
+Expected bit avalanche for good cipher: ~50%
+Expected word avalanche for good diffusion: ~100%
+
+Testing avalanche effect vs. number of rounds:
+Block size: 512 words (4096 bytes)
+------------------------------------------------------------
+Testing 100 random bit flips........ done!
+Test 1/3: Avalanche 15.62%, Words affected 100.00%
+Testing 100 random bit flips........ done!
+Test 2/3: Avalanche 15.61%, Words affected 100.00%
+Testing 100 random bit flips........ done!
+Test 3/3: Avalanche 15.61%, Words affected 100.00%
+Rounds:  1 | Bit avalanche:  15.61% ±  0.01 | Word avalanche: 100.00% ±  0.00
+Testing 100 random bit flips........ done!
+Test 1/3: Avalanche 15.63%, Words affected 100.00%
+Testing 100 random bit flips........ done!
+Test 2/3: Avalanche 15.62%, Words affected 100.00%
+Testing 100 random bit flips........ done!
+Test 3/3: Avalanche 15.60%, Words affected 100.00%
+Rounds:  3 | Bit avalanche:  15.62% ±  0.01 | Word avalanche: 100.00% ±  0.00
+Testing 100 random bit flips........ done!
+Test 1/3: Avalanche 15.63%, Words affected 100.00%
+Testing 100 random bit flips........ done!
+Test 2/3: Avalanche 15.64%, Words affected 100.00%
+Testing 100 random bit flips........ done!
+Test 3/3: Avalanche 15.64%, Words affected 100.00%
+Rounds:  5 | Bit avalanche:  15.64% ±  0.00 | Word avalanche: 100.00% ±  0.00
+Testing 100 random bit flips........ done!
+Test 1/3: Avalanche 15.63%, Words affected 100.00%
+Testing 100 random bit flips........ done!
+Test 2/3: Avalanche 15.64%, Words affected 100.00%
+Testing 100 random bit flips........ done!
+Test 3/3: Avalanche 15.63%, Words affected 100.00%
+Rounds:  8 | Bit avalanche:  15.63% ±  0.00 | Word avalanche: 100.00% ±  0.00
+Testing 100 random bit flips........ done!
+Test 1/3: Avalanche 15.61%, Words affected 100.00%
+Testing 100 random bit flips........ done!
+Test 2/3: Avalanche 15.63%, Words affected 100.00%
+Testing 100 random bit flips........ done!
+Test 3/3: Avalanche 15.63%, Words affected 100.00%
+Rounds: 10 | Bit avalanche:  15.62% ±  0.01 | Word avalanche: 100.00% ±  0.00
+Testing 100 random bit flips........ done!
+Test 1/3: Avalanche 15.64%, Words affected 100.00%
+Testing 100 random bit flips........ done!
+Test 2/3: Avalanche 15.64%, Words affected 100.00%
+Testing 100 random bit flips........ done!
+Test 3/3: Avalanche 15.62%, Words affected 100.00%
+Rounds: 15 | Bit avalanche:  15.64% ±  0.01 | Word avalanche: 100.00% ±  0.00

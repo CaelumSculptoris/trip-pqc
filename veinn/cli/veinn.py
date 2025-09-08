@@ -51,7 +51,7 @@ import numpy as np
 import argparse
 import pickle
 import time
-from typing import Optional
+from typing import Optional, List
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
@@ -94,7 +94,7 @@ class VeinnParams:
     shuffle_stride: int = 15  # Permutation stride (must be coprime with n)
     use_lwe: bool = True  # Enable LWE-based key derivation for post-quantum security
     valid: int = 3600  # Timestamp validity window in seconds
-    seed_len: int = 32  # Seed length for cryptographic randomness
+    seed_len: int = 64  # Seed length for cryptographic randomness
     q: int = 1049089  # Prime modulus for field operations (≈2^20 for efficiency)
 
 # -----------------------------
@@ -202,7 +202,7 @@ def derive_u16(count: int, vp: VeinnParams, *chunks: bytes) -> np.ndarray:
         return lwe_prf_expand(seed_derive, count, vp)
     # Fallback to direct SHAKE expansion for classical security
     raw = shake(count * 2, *chunks)
-    return np.frombuffer(raw, dtype=np.int64)[:count].copy()
+    return np.frombuffer(raw, dtype=np.uint16)[:count].astype(np.int64).copy()
 
 def odd_constant_from_key(tag: bytes) -> int:
     """
@@ -260,6 +260,7 @@ def unpad_iso7816(padded: bytes) -> bytes:
     i = padded.rfind(b"\x80")
     if i == -1 or any(b != 0 for b in padded[i+1:]):
         raise ValueError("Invalid padding")
+
     return padded[:i]
 
 # Primary S-box: modular inverse (0 -> 0). Clean, bijective if q is prime (or for units).
@@ -1333,6 +1334,8 @@ def permute_forward(x: np.ndarray, key: VeinnKey) -> np.ndarray:
         # S-box layer: nonlinear substitution (confusion)
         y = np.array(sbox_layer(y, vp.q), dtype=np.int64)
         
+        #y = bit_mix_layer(y)
+
         # Shuffle layer: linear permutation (diffusion)
         y = shuffle(y, idx)
     return y.astype(np.int64)
@@ -1371,7 +1374,8 @@ def permute_inverse(x: np.ndarray, key: VeinnKey) -> np.ndarray:
     for r in reversed(range(vp.rounds)):
         # Reverse shuffle layer
         y = unshuffle(y, idx)
-        
+        #y = bit_mix_layer_inverse(y)
+
         # Reverse S-box layer
         y = np.array(inv_sbox_layer(y, vp.q), dtype=np.int64)
         
@@ -2248,11 +2252,11 @@ def encrypt_with_pub(pubfile: str, file_type: str, message: Optional[str] = None
     blocks = [bytes_to_block(message_bytes[i:i + vp.n * 2], vp.n) for i in range(0, len(message_bytes), vp.n * 2)]
     for b in blocks:
         assert b.shape == (vp.n,)  # Verify block structure
-    
+
     # Encrypt each block using Veinn forward permutation
     # This is the "DEM" (Data Encapsulation Mechanism) part
     enc_blocks = [permute_forward(b, k) for b in blocks]
-    
+
     # Store encryption metadata for decryption
     metadata = {
         "n": vp.n,
@@ -2878,6 +2882,226 @@ def menu_decrypt_with_public_veinn():
         
     decrypt_with_public_veinn(seed_input, file_type, enc_file, validity_window)
 
+
+
+def bit_mix_layer(vec: np.ndarray) -> np.ndarray:
+    out = np.array(vec, dtype=np.int64)
+    for i in range(len(out)):
+        x = out[i]
+        x = ((x << 7) | (x >> 25)) ^ x
+        x = ((x << 11) | (x >> 21)) ^ x
+        out[i] = x
+    return out
+
+def bit_mix_layer_inverse(vec: np.ndarray) -> np.ndarray:
+    out = np.array(vec, dtype=np.int64)
+    for i in range(len(out)):
+        x = out[i]
+        x = ((x << 11) | (x >> 21)) ^ x
+        x = ((x << 7) | (x >> 25)) ^ x
+        out[i] = x
+    return out
+
+def flip_bit(data: np.ndarray, bit_position: int) -> np.ndarray:
+    """
+    Flip a single bit in the input array.
+
+
+    Args:
+        data: Input array of int64 values
+        bit_position: Global bit position to flip (0 to n*64-1)
+
+    Returns:
+        Array with single bit flipped
+    """
+    result = data.copy()
+    word_index = bit_position // 64
+    bit_index = bit_position % 64
+
+    if word_index < len(result):
+        # Use numpy int64 to avoid C long overflow
+        mask = np.int64(1) << np.int64(bit_index)
+        result[word_index] = np.int64(result[word_index]) ^ mask
+
+    return result
+
+
+def hamming_distance_bits(a: np.ndarray, b: np.ndarray) -> int:
+    """
+    Calculate Hamming distance in bits between two arrays.
+
+
+    Args:
+        a, b: Arrays to compare
+
+    Returns:
+        Number of different bits
+    """
+    xor_result = a ^ b
+    # Count set bits in each word and sum
+    return sum(bin(int(word)).count('1') for word in xor_result)
+
+
+def avalanche_test_single_input(plaintext: np.ndarray, key, num_bit_tests: int = 100) -> dict:
+    """
+    Test avalanche effect by flipping random bits (sampled for performance).
+
+
+    Args:
+        plaintext: Input block to test
+        key: VEINN key for encryption
+        num_bit_tests: Number of random bit positions to test
+
+    Returns:
+        Dictionary with avalanche statistics
+    """
+    n = len(plaintext)
+    total_bits = n * 64
+
+    # Encrypt original plaintext
+    original_ciphertext = permute_forward(plaintext, key)
+
+    bit_changes = []
+    word_changes = []
+
+    # Test random sample of bit positions (much faster)
+    bit_positions = np.random.choice(total_bits, size=min(num_bit_tests, total_bits), replace=False)
+
+    print(f"Testing {len(bit_positions)} random bit flips...", end="", flush=True)
+
+    for i, bit_pos in enumerate(bit_positions):
+        if i % 20 == 0:
+            print(".", end="", flush=True)
+            
+        # Flip single bit
+        modified_plaintext = flip_bit(plaintext, bit_pos)
+        
+        # Encrypt modified plaintext
+        modified_ciphertext = permute_forward(modified_plaintext, key)
+        
+        # Calculate differences
+        bit_diff = hamming_distance_bits(original_ciphertext, modified_ciphertext)
+        word_diff = np.sum(original_ciphertext != modified_ciphertext)
+        
+        bit_changes.append(bit_diff)
+        word_changes.append(word_diff)
+
+    print(" done!")
+
+    # Calculate statistics
+    total_output_bits = n * 64
+    bit_changes_array = np.array(bit_changes)
+    word_changes_array = np.array(word_changes)
+
+    results = {
+        'total_input_bits': total_bits,
+        'total_output_bits': total_output_bits,
+        'total_output_words': n,
+        'bits_tested': len(bit_positions),
+        'bit_changes': {
+            'mean': float(np.mean(bit_changes_array)),
+            'std': float(np.std(bit_changes_array)),
+            'min': int(np.min(bit_changes_array)),
+            'max': int(np.max(bit_changes_array)),
+            'median': float(np.median(bit_changes_array))
+        },
+        'word_changes': {
+            'mean': float(np.mean(word_changes_array)),
+            'std': float(np.std(word_changes_array)),
+            'min': int(np.min(word_changes_array)),
+            'max': int(np.max(word_changes_array)),
+            'median': float(np.median(word_changes_array))
+        },
+        'avalanche_percentage': float(np.mean(bit_changes_array) / total_output_bits * 100),
+        'word_avalanche_percentage': float(np.mean(word_changes_array) / n * 100)
+    }
+
+    return results
+
+
+def comprehensive_avalanche_test(vp: VeinnParams, num_tests: int = 10) -> dict:
+    """
+    Run comprehensive avalanche tests with multiple random inputs and keys.
+    Args:
+        vp: VEINN parameters
+        num_tests: Number of random test cases
+
+    Returns:
+        Aggregated avalanche test results
+    """
+    all_results = []
+
+    for test_num in range(num_tests):
+        # Generate random key and plaintext
+        seed = secrets.token_bytes(32)
+        key = key_from_seed(seed, vp)
+        plaintext = np.random.randint(0, vp.q, size=vp.n, dtype=np.int64)
+        
+        # Run avalanche test
+        result = avalanche_test_single_input(plaintext, key)
+        all_results.append(result)
+        
+        print(f"Test {test_num + 1}/{num_tests}: "
+            f"Avalanche {result['avalanche_percentage']:.2f}%, "
+            f"Words affected {result['word_avalanche_percentage']:.2f}%")
+
+    # Aggregate results
+    avalanche_percentages = [r['avalanche_percentage'] for r in all_results]
+    word_avalanche_percentages = [r['word_avalanche_percentage'] for r in all_results]
+
+    aggregated = {
+        'num_tests': num_tests,
+        'parameters': {
+            'n': vp.n,
+            'rounds': vp.rounds,
+            'layers_per_round': vp.layers_per_round,
+            'use_lwe': vp.use_lwe
+        },
+        'avalanche_percentage': {
+            'mean': float(np.mean(avalanche_percentages)),
+            'std': float(np.std(avalanche_percentages)),
+            'min': float(np.min(avalanche_percentages)),
+            'max': float(np.max(avalanche_percentages))
+        },
+        'word_avalanche_percentage': {
+            'mean': float(np.mean(word_avalanche_percentages)),
+            'std': float(np.std(word_avalanche_percentages)),
+            'min': float(np.min(word_avalanche_percentages)),
+            'max': float(np.max(word_avalanche_percentages))
+        }
+    }
+
+    return aggregated
+
+
+def run_round_analysis(vp: VeinnParams, num_tests: int = 5):
+    """
+    Test avalanche effect at different numbers of rounds.
+    """
+    original_rounds = vp.rounds
+
+    print(f"\nTesting avalanche effect vs. number of rounds:")
+    print(f"Block size: {vp.n} words ({vp.n * 8} bytes)")
+    print("-" * 60)
+
+    for rounds in [1, 3, 5, 8, 10, 15, 20]:
+        if rounds > original_rounds:
+            continue
+            
+        # Temporarily modify rounds
+        vp.rounds = rounds
+        
+        # Quick test with fewer samples
+        results = comprehensive_avalanche_test(vp, num_tests=num_tests)
+        
+        print(f"Rounds: {rounds:2d} | "
+            f"Bit avalanche: {results['avalanche_percentage']['mean']:6.2f}% ± {results['avalanche_percentage']['std']:5.2f} | "
+            f"Word avalanche: {results['word_avalanche_percentage']['mean']:6.2f}% ± {results['word_avalanche_percentage']['std']:5.2f}")
+
+    # Restore original rounds
+    vp.rounds = original_rounds
+
+
 def main():
     parser = argparse.ArgumentParser(description="VEINN - Vector Encrypted Invertible Neural Network")
     subparsers = parser.add_subparsers(dest="command")
@@ -3015,6 +3239,31 @@ def main():
                                 menu_decrypt_with_public_veinn()
                             case "7":
                                 menu_veinn_from_seed()
+                            case "8":
+                                vp = VeinnParams()
+                  
+                                print("VEINN Avalanche Test")
+                                print("=" * 50)
+                                print(f"Testing with parameters:")
+                                print(f"  Block size: {vp.n} words ({vp.n * 8} bytes)")
+                                print(f"  Rounds: {vp.rounds}")
+                                print(f"  Layers per round: {vp.layers_per_round}")
+                                print(f"  Use LWE: {vp.use_lwe}")
+                                print(f"  Modulus: {vp.q}")
+                                print()
+
+                                # Run comprehensive test
+                                results = comprehensive_avalanche_test(vp, num_tests=10)
+
+                                print("\nAvalanche Test Results:")
+                                print("-" * 30)
+                                print(f"Bit-level avalanche: {results['avalanche_percentage']['mean']:.2f}% ± {results['avalanche_percentage']['std']:.2f}%")
+                                print(f"Word-level avalanche: {results['word_avalanche_percentage']['mean']:.2f}% ± {results['word_avalanche_percentage']['std']:.2f}%")
+                                print(f"Expected bit avalanche for good cipher: ~50%")
+                                print(f"Expected word avalanche for good diffusion: ~100%")
+
+                                # Test round dependency
+                                run_round_analysis(vp, num_tests=3)
                             case _:
                                 print("Invalid choice")
                     except Exception as e:
