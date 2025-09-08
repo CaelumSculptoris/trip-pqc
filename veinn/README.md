@@ -198,64 +198,74 @@ It is not yet standardized, audited, or production-ready. Use at your own risk.
 MIT License
 
 ## Notes   
+   - Full pipeline test added.
 
 ### Updates   
-   - We're getting great word level, but poor bit level avalanche. Considering implementing bit shift during permutation. Currently looking into padding issues whi
+   - Updated avalanche test
 
 ### TODO
-   - Fix padding
-   - Implement bit shift
+   - Update package
+   
 
 ### Avalanche Test Results
-Avalanche Test Results:
-------------------------------
-Bit-level avalanche: 15.62% ± 0.01%
-Word-level avalanche: 100.00% ± 0.00%
-Expected bit avalanche for good cipher: ~50%
-Expected word avalanche for good diffusion: ~100%
+Using VEINN parameters: n=512, rounds=15, layers=15
 
-Testing avalanche effect vs. number of rounds:
-Block size: 512 words (4096 bytes)
+Choose test type:
+1) Single message test
+2) Multiple message sizes
+Choice [1]: 1
+Enter test message: This is a test
+Number of bit flips to test [100]: 
+Testing 100 random bit flips in 112-bit message........ done!
+
+Results for 14-byte message:
+Message padded to 1024 bytes (1 blocks)
+Bit avalanche: 49.99%
+Block avalanche: 100.00%
+Average bits changed: 4095.3 / 8192
+Average blocks affected: 1.0 / 1
+
+Using VEINN parameters: n=512, rounds=15, layers=15
+
+Choose test type:
+1) Single message test
+2) Multiple message sizes
+Choice [1]: 2
+
+Testing message 1/7: 5 bytes
+Testing 50 random bit flips in 40-bit message..... done!
+  Avalanche: 49.91%, Blocks affected: 100.00%
+
+Testing message 2/7: 37 bytes
+Testing 50 random bit flips in 296-bit message...... done!
+  Avalanche: 50.01%, Blocks affected: 100.00%
+
+Testing message 3/7: 100 bytes
+Testing 50 random bit flips in 800-bit message...... done!
+  Avalanche: 49.97%, Blocks affected: 100.00%
+
+Testing message 4/7: 1014 bytes
+Testing 50 random bit flips in 8112-bit message...... done!
+  Avalanche: 50.09%, Blocks affected: 100.00%
+
+Testing message 5/7: 1024 bytes
+Testing 50 random bit flips in 8192-bit message...... done!
+  Avalanche: 24.96%, Blocks affected: 50.00%
+
+Testing message 6/7: 1034 bytes
+Testing 50 random bit flips in 8272-bit message...... done!
+  Avalanche: 24.96%, Blocks affected: 50.00%
+
+Testing message 7/7: 2048 bytes
+Testing 50 random bit flips in 16384-bit message...... done!
+  Avalanche: 16.67%, Blocks affected: 33.33%
+
+Summary across message sizes:
 ------------------------------------------------------------
-Testing 100 random bit flips........ done!
-Test 1/3: Avalanche 15.62%, Words affected 100.00%
-Testing 100 random bit flips........ done!
-Test 2/3: Avalanche 15.61%, Words affected 100.00%
-Testing 100 random bit flips........ done!
-Test 3/3: Avalanche 15.61%, Words affected 100.00%
-Rounds:  1 | Bit avalanche:  15.61% ±  0.01 | Word avalanche: 100.00% ±  0.00
-Testing 100 random bit flips........ done!
-Test 1/3: Avalanche 15.63%, Words affected 100.00%
-Testing 100 random bit flips........ done!
-Test 2/3: Avalanche 15.62%, Words affected 100.00%
-Testing 100 random bit flips........ done!
-Test 3/3: Avalanche 15.60%, Words affected 100.00%
-Rounds:  3 | Bit avalanche:  15.62% ±  0.01 | Word avalanche: 100.00% ±  0.00
-Testing 100 random bit flips........ done!
-Test 1/3: Avalanche 15.63%, Words affected 100.00%
-Testing 100 random bit flips........ done!
-Test 2/3: Avalanche 15.64%, Words affected 100.00%
-Testing 100 random bit flips........ done!
-Test 3/3: Avalanche 15.64%, Words affected 100.00%
-Rounds:  5 | Bit avalanche:  15.64% ±  0.00 | Word avalanche: 100.00% ±  0.00
-Testing 100 random bit flips........ done!
-Test 1/3: Avalanche 15.63%, Words affected 100.00%
-Testing 100 random bit flips........ done!
-Test 2/3: Avalanche 15.64%, Words affected 100.00%
-Testing 100 random bit flips........ done!
-Test 3/3: Avalanche 15.63%, Words affected 100.00%
-Rounds:  8 | Bit avalanche:  15.63% ±  0.00 | Word avalanche: 100.00% ±  0.00
-Testing 100 random bit flips........ done!
-Test 1/3: Avalanche 15.61%, Words affected 100.00%
-Testing 100 random bit flips........ done!
-Test 2/3: Avalanche 15.63%, Words affected 100.00%
-Testing 100 random bit flips........ done!
-Test 3/3: Avalanche 15.63%, Words affected 100.00%
-Rounds: 10 | Bit avalanche:  15.62% ±  0.01 | Word avalanche: 100.00% ±  0.00
-Testing 100 random bit flips........ done!
-Test 1/3: Avalanche 15.64%, Words affected 100.00%
-Testing 100 random bit flips........ done!
-Test 2/3: Avalanche 15.64%, Words affected 100.00%
-Testing 100 random bit flips........ done!
-Test 3/3: Avalanche 15.62%, Words affected 100.00%
-Rounds: 15 | Bit avalanche:  15.64% ±  0.01 | Word avalanche: 100.00% ±  0.00
+       5 bytes:  49.91% bit, 100.00% block avalanche
+      37 bytes:  50.01% bit, 100.00% block avalanche
+     100 bytes:  49.97% bit, 100.00% block avalanche
+    1014 bytes:  50.09% bit, 100.00% block avalanche
+    1024 bytes:  24.96% bit,  50.00% block avalanche
+    1034 bytes:  24.96% bit,  50.00% block avalanche
+    2048 bytes:  16.67% bit,  33.33% block avalanche
