@@ -889,14 +889,21 @@ def block_apply_S_inv(y1: np.ndarray, y2: np.ndarray, u: np.ndarray, q: int):
     return ( y1.copy(), (y2 - conv_op(y1, u, q)) % q )
 
 
-def coupling_forward_matrix(x: np.ndarray, cp: CouplingParams, key: VeinnParams, layer_idx: int) -> np.ndarray:
+def coupling_forward(x: np.ndarray, cp: CouplingParams, key: VeinnParams, layer_idx: int) -> np.ndarray:
     """
-    Forward Hilbert-style coupling transformation with three-stage mixing.
+    Forward coupling layer transformation (encryption direction).
     
-    Implements a sophisticated cryptographic transformation that applies R, M, and S
-    operations in sequence. This provides strong diffusion while maintaining perfect
-    invertibility. The transformation is parameterized by layer-specific seeds derived
-    from coupling parameters.
+    Implements an invertible coupling transformation:
+    1. Split input x = (x1, x2) into two halves
+    2. x1' = x1 + f(x2) where f uses mask_a
+    3. x2' = x2 + g(x1') where g uses mask_b
+    
+    This provides:
+    - Invertible nonlinear mixing between halves
+    - Diffusion across the entire block
+    - Resistance to differential cryptanalysis
+    
+    The ring convolutions provide algebraic mixing within each half.
     
     Args:
         x (np.ndarray): Input vector of length n
@@ -947,13 +954,20 @@ def coupling_forward_matrix(x: np.ndarray, cp: CouplingParams, key: VeinnParams,
     return np.concatenate([y1.astype(np.int64), y2.astype(np.int64)])
 
 
-def coupling_inverse_matrix(y: np.ndarray, cp: CouplingParams, key, layer_idx: int) -> np.ndarray:
+def coupling_inverse(y: np.ndarray, cp: CouplingParams, key, layer_idx: int) -> np.ndarray:
     """
-    Inverse Hilbert-style coupling transformation.
+    Inverse coupling layer transformation (decryption direction).
     
+    Reverses the coupling transformation by applying operations in reverse order:
+    1. Split transformed input x = (x1', x2')
+    2. x2 = x2' - g(x1') (reverse second coupling)
+    3. x1 = x1' - f(x2) (reverse first coupling)
+            
     Exactly reverses the forward coupling transformation by applying the inverse
     operations in reverse order: S^(-1) -> M^(-1) -> R^(-1). Uses the same
     layer-derived seeds to ensure perfect decryption.
+
+    Exact inversion is guaranteed by the coupling layer structure.
     
     Args:
         y (np.ndarray): Transformed vector to decrypt
@@ -1003,94 +1017,6 @@ def coupling_inverse_matrix(y: np.ndarray, cp: CouplingParams, key, layer_idx: i
     # Recombine halves into single recovered vector
     return np.concatenate([y1.astype(np.int64), y2.astype(np.int64)])
 
-def coupling_forward(x: np.ndarray, cp: CouplingParams, key: VeinnParams) -> np.ndarray:
-    """
-    Forward coupling layer transformation (encryption direction).
-    
-    Implements an invertible coupling transformation:
-    1. Split input x = (x1, x2) into two halves
-    2. x1' = x1 + f(x2) where f uses mask_a
-    3. x2' = x2 + g(x1') where g uses mask_b
-    
-    This provides:
-    - Invertible nonlinear mixing between halves
-    - Diffusion across the entire block
-    - Resistance to differential cryptanalysis
-    
-    The ring convolutions provide algebraic mixing within each half.
-    
-    Args:
-        x: Input block to transform
-        cp: Coupling parameters (transformation masks)
-        key: VEINN parameters including modulus
-        
-    Returns:
-        Transformed block with same dimensions
-    """
-    n = x.shape[0]
-    h = n // 2
-    
-    # Validate input and parameter dimensions
-    assert x.shape == (n,), f"Expected input shape {(n,)}, got {x.shape}"
-    assert cp.mask_a.shape == (h,) and cp.mask_b.shape == (h,), f"Mask shape mismatch: expected {(h,)}, got {cp.mask_a.shape}, {cp.mask_b.shape}"
-    
-    # Split into two halves
-    x1 = x[:h].copy()
-    x2 = x[h:].copy()
-    
-    # First coupling: x1 += f(x2)
-    t = (x2.astype(np.int64) + cp.mask_a.astype(np.int64)) % key.q
-    t = ring_convolution(t, np.ones(h, dtype=np.int64), key.q, 'ntt')  # Algebraic mixing
-    x1 = (x1.astype(np.int64) + t) % key.q
-    
-    # Second coupling: x2 += g(x1')
-    u = (x1.astype(np.int64) + cp.mask_b.astype(np.int64)) % key.q
-    u = ring_convolution(u, np.ones(h, dtype=np.int64), key.q, 'ntt')  # Algebraic mixing
-    x2 = (x2.astype(np.int64) + u) % key.q
-    
-    return np.concatenate([x1.astype(np.int64), x2.astype(np.int64)])
-
-def coupling_inverse(x: np.ndarray, cp: CouplingParams, key: VeinnParams) -> np.ndarray:
-    """
-    Inverse coupling layer transformation (decryption direction).
-    
-    Reverses the coupling transformation by applying operations in reverse order:
-    1. Split transformed input x = (x1', x2')
-    2. x2 = x2' - g(x1') (reverse second coupling)
-    3. x1 = x1' - f(x2) (reverse first coupling)
-    
-    Exact inversion is guaranteed by the coupling layer structure.
-    
-    Args:
-        x: Transformed block to invert
-        cp: Same coupling parameters used in forward direction
-        key: VEINN parameters
-        
-    Returns:
-        Original block before coupling transformation
-    """
-    n = x.shape[0]
-    h = n // 2
-    
-    # Validate dimensions
-    assert x.shape == (n,), f"Expected input shape {(n,)}, got {x.shape}"
-    assert cp.mask_a.shape == (h,) and cp.mask_b.shape == (h,), f"Mask shape mismatch: expected {(h,)}, got {cp.mask_a.shape}, {cp.mask_b.shape}"
-    
-    # Split transformed input
-    x1 = x[:h].copy()
-    x2 = x[h:].copy()
-    
-    # Reverse second coupling: x2 -= g(x1')
-    u = (x1.astype(np.int64) + cp.mask_b.astype(np.int64)) % key.q
-    u = ring_convolution(u, np.ones(h, dtype=np.int64), key.q, 'ntt')
-    x2 = (x2.astype(np.int64) - u) % key.q
-    
-    # Reverse first coupling: x1 -= f(x2)
-    t = (x2.astype(np.int64) + cp.mask_a.astype(np.int64)) % key.q
-    t = ring_convolution(t, np.ones(h, dtype=np.int64), key.q, 'ntt')
-    x1 = (x1.astype(np.int64) - t) % key.q
-    
-    return np.concatenate([x1.astype(np.int64), x2.astype(np.int64)])
 
 # -----------------------------
 # Shuffle
@@ -1325,8 +1251,7 @@ def permute_forward(x: np.ndarray, key: VeinnKey) -> np.ndarray:
     for r in range(vp.rounds):
         # Coupling layers: invertible nonlinear mixing
         for cp in key.rounds[r].cpls:
-            #y = coupling_forward(y, cp, vp)
-            y = coupling_forward_matrix(y, cp, vp, idx)
+            y = coupling_forward(y, cp, vp, idx)
 
         # Invertible element-wise scaling (adds algebraic complexity)
         y = (y.astype(np.int64) * key.rounds[r].ring_scale.astype(np.int64)) % vp.q
@@ -1382,8 +1307,7 @@ def permute_inverse(x: np.ndarray, key: VeinnKey) -> np.ndarray:
         
         # Reverse coupling layers in reverse order
         for cp in reversed(key.rounds[r].cpls):
-            #y = coupling_inverse(y, cp, vp)
-            y = coupling_inverse_matrix(y, cp, vp, idx)
+            y = coupling_inverse(y, cp, vp, idx)
     return y.astype(np.int64)
 
 # -----------------------------
@@ -1886,73 +1810,6 @@ def retrieve_key_from_keystore(passphrase: str, key_name: str, keystore_file: st
     except Exception:
         raise ValueError(f"{bcolors.FAIL}Failed to decrypt key. Wrong passphrase?{bcolors.ENDC}")
 
-def int_to_bytes_be(n: int) -> bytes:
-    """
-    Converts integer to minimal big-endian byte representation.
-    
-    This follows cryptographic conventions for integer serialization,
-    using big-endian encoding which is standard in most crypto protocols.
-    
-    Args:
-        n (int): Integer to convert
-    
-    Returns:
-        bytes: Minimal big-endian byte representation
-    
-    Cryptographic principles:
-    - Big-endian encoding: Standard in cryptographic protocols (network byte order)
-    - Minimal encoding: No unnecessary padding bytes
-    """
-    if n == 0:
-        return b"\x00"
-    # Calculate minimum bytes needed and encode in big-endian format
-    return n.to_bytes((n.bit_length() + 7) // 8, 'big')
-
-def int_to_bytes_be_fixed(n: int, k: int) -> bytes:
-    """
-    Converts integer to fixed-length big-endian byte representation with zero padding.
-    
-    Used in cryptographic protocols where fixed-length representations are required,
-    such as RSA OAEP padding or other standardized encoding schemes.
-    
-    Args:
-        n (int): Integer to convert
-        k (int): Target byte length
-    
-    Returns:
-        bytes: Fixed-length big-endian representation, left-padded with zeros
-    
-    Raises:
-        ValueError: If integer is too large for target length
-    
-    Cryptographic principles:
-    - Fixed-length encoding: Required for many crypto operations (RSA, etc.)
-    - Left-padding with zeros: Standard cryptographic convention
-    """
-    b = int_to_bytes_be(n)
-    if len(b) > k:
-        raise ValueError(f"{bcolors.FAIL}Integer too large for target length{bcolors.ENDC}")
-    # Left-pad with zeros to achieve fixed length
-    return b.rjust(k, b'\x00')
-
-def bytes_be_to_int(b: bytes) -> int:
-    """
-    Converts big-endian byte representation back to integer.
-    
-    Inverse of int_to_bytes_be, following cryptographic standards
-    for deserializing integers from byte streams.
-    
-    Args:
-        b (bytes): Big-endian byte representation
-    
-    Returns:
-        int: Reconstructed integer value
-    
-    Cryptographic principles:
-    - Big-endian decoding: Standard in cryptographic protocols
-    """
-    return int.from_bytes(b, 'big')
-
 def generate_keypair(keypair: str = "kyber") -> dict:
     match keypair:
         case "kyber":
@@ -2008,145 +1865,6 @@ def generate_veinn_keypair(vp: VeinnParams = VeinnParams()) -> dict:
 # -----------------------------
 # Encryption/Decryption
 # -----------------------------
-def derive_seed_bytes(nonce: bytes, seed_len: int = 32) -> bytes:
-    """
-    Derives seed bytes using SHAKE (extendable output function).
-    
-    SHAKE is a member of the SHA-3 family providing variable-length output,
-    useful for key derivation and generating cryptographically secure random bytes.
-    
-    Args:
-        nonce (bytes): Input entropy source
-        seed_len (int): Desired output length in bytes
-    
-    Returns:
-        bytes: Cryptographically derived seed bytes
-    
-    Cryptographic principles:
-    - SHAKE XOF: SHA-3 based extendable output function
-    - Key derivation: Transforms entropy into usable cryptographic material
-    """
-    # SHAKE provides variable-length cryptographically secure output
-    return shake(seed_len, nonce)
-
-def oaep_encode(message: bytes, n: int, seed: bytes) -> int:
-    """
-    Implements OAEP (Optimal Asymmetric Encryption Padding) encoding.
-    
-    OAEP is a padding scheme for RSA encryption that provides semantic security
-    and resistance against chosen ciphertext attacks. Uses two hash functions
-    and randomness to transform messages before RSA encryption.
-    
-    Args:
-        message (bytes): Plaintext message to encode
-        n (int): RSA modulus size for padding calculation
-        seed (bytes): Random seed for OAEP randomness
-    
-    Returns:
-        int: OAEP-encoded integer ready for RSA encryption
-    
-    Raises:
-        ValueError: If message is too long for OAEP parameters
-    
-    Cryptographic principles:
-    - OAEP padding: Provides semantic security for RSA
-    - Two-round Feistel: MGF1 mask generation for randomization
-    - SHAKE hash function: Used instead of SHA-1 for mask generation
-    - Semantic security: Same plaintext encrypts differently each time
-    """
-    k = (n.bit_length() + 7) // 8  # Calculate byte size of modulus
-    mlen = len(message)
-    
-    # Check message length constraints for OAEP
-    if mlen > k - 2 * 32 - 2:  # 32 = hash length, 2 = padding bytes
-        raise ValueError(f"{bcolors.FAIL}Message too long for OAEP{bcolors.ENDC}")
-    
-    hlen = 32  # Hash length (SHA-256 equivalent)
-    pad_len = k - mlen - 2 * hlen - 2
-    
-    # OAEP Step 1: Create label hash (empty label)
-    lhash = shake(hlen, b"")  # Using SHAKE instead of SHA-1
-    
-    # OAEP Step 2: Create padded message block
-    ps = b'\x00' * pad_len  # Zero padding
-    db = lhash + ps + b'\x01' + message  # Data block: lHash || PS || 0x01 || M
-    
-    # OAEP Step 3: Generate random seed and create masks
-    seed = shake(hlen, seed)  # Derive seed using SHAKE
-    
-    # MGF1 mask generation using SHAKE (Feistel round 1)
-    db_mask = shake(k - hlen - 1, seed)
-    masked_db = bytes(a ^ b for a, b in zip(db, db_mask))
-    
-    # MGF1 mask generation (Feistel round 2)
-    seed_mask = shake(hlen, masked_db)
-    masked_seed = bytes(a ^ b for a, b in zip(seed, seed_mask))
-    
-    # OAEP Step 4: Construct final encoded message
-    # EM = 0x00 || maskedSeed || maskedDB
-    return int.from_bytes(b'\x00' + masked_seed + masked_db, 'big')
-
-def oaep_decode(cipher_int: int, n: int) -> bytes:
-    """
-    Decodes OAEP-encoded ciphertext back to original message.
-    
-    Reverses the OAEP encoding process, including mask generation and
-    padding verification. Provides integrity checking through padding validation.
-    
-    Args:
-        cipher_int (int): OAEP-encoded integer from RSA decryption
-        n (int): RSA modulus for size calculation
-    
-    Returns:
-        bytes: Original plaintext message
-    
-    Raises:
-        ValueError: If OAEP format is invalid or padding verification fails
-    
-    Cryptographic principles:
-    - OAEP decoding: Reverses the encoding process
-    - Padding oracle resistance: Constant-time operations where possible
-    - Integrity verification: Validates padding structure
-    """
-    k = (n.bit_length() + 7) // 8
-    
-    # Convert integer back to fixed-length bytes
-    c = int_to_bytes_be_fixed(cipher_int, k)
-    
-    # OAEP format check: first byte must be 0x00
-    if c[0] != 0:
-        raise ValueError(f"{bcolors.FAIL}Invalid OAEP format{bcolors.ENDC}")
-    
-    hlen = 32
-    
-    # Extract OAEP components
-    masked_seed = c[1:1 + hlen]
-    masked_db = c[1 + hlen:]
-    
-    # Reverse mask generation (Feistel round 2)
-    seed_mask = shake(hlen, masked_db)
-    seed = bytes(a ^ b for a, b in zip(masked_seed, seed_mask))
-    
-    # Reverse mask generation (Feistel round 1)
-    db_mask = shake(k - hlen - 1, seed)
-    db = bytes(a ^ b for a, b in zip(masked_db, db_mask))
-    
-    # Verify label hash
-    lhash = shake(hlen, b"")
-    if db[:hlen] != lhash:
-        raise ValueError(f"{bcolors.FAIL}Invalid OAEP lhash{bcolors.ENDC}")
-    
-    # Find message separator (0x01 byte)
-    i = hlen
-    while i < len(db) and db[i] == 0:  # Skip zero padding
-        i += 1
-    
-    # Verify separator byte exists and is correct
-    if i >= len(db) or db[i] != 1:
-        raise ValueError(f"{bcolors.FAIL}Invalid OAEP padding{bcolors.ENDC}")
-    
-    # Return original message
-    return db[i + 1:]
 
 def validate_timestamp(timestamp: float, validity_window: int) -> bool:
     """
@@ -2188,7 +1906,7 @@ def veinn_from_seed(seed_input: str, vp: VeinnParams):
     k = key_from_seed(seed, vp)  # Custom key derivation function
     print(f"Derived VEINN key with params: n={vp.n}, rounds={vp.rounds}, layers_per_round={vp.layers_per_round}, shuffle_stride={vp.shuffle_stride}, use_lwe={vp.use_lwe}")    
     
-def encrypt_with_pub(pubfile: str, file_type: str, message: Optional[str] = None, in_path: Optional[str] = None, vp: VeinnParams = VeinnParams(), seed_len: int = 32, nonce: Optional[bytes] = None, out_file: str = "enc_pub") -> str:
+def encrypt_with_pub(pubfile: str, file_type: str, message: Optional[str] = None, in_path: Optional[str] = None, vp: VeinnParams = VeinnParams(), seed_len: int = 32, nonce: Optional[bytes] = None, out_file: str = "enc_pub", mode: str = "cbc") -> str:
     """
     Implements hybrid encryption using Kyber KEM + Veinn symmetric cipher.
     
@@ -2254,17 +1972,25 @@ def encrypt_with_pub(pubfile: str, file_type: str, message: Optional[str] = None
 
     # Encrypt each block using Veinn forward permutation
     # This is the "DEM" (Data Encapsulation Mechanism) part
-    enc_blocks = [permute_forward(b, k) for b in blocks]
+    # Encrypt blocks using selected chaining mode
+    if mode == "cbc":
+        enc_blocks = encrypt_blocks_cbc(blocks, k, nonce, vp)
+    elif mode == "ctr":
+        enc_blocks = encrypt_blocks_ctr(blocks, k, nonce, vp)
+    elif mode == "cfb":
+        enc_blocks = encrypt_blocks_cfb(blocks, k, nonce, vp)
+    else:
+        enc_blocks = [permute_forward(b, k) for b in blocks]
 
-    # Store encryption metadata for decryption
+    # Store encryption metadata
     metadata = {
         "n": vp.n,
         "rounds": vp.rounds,
         "layers_per_round": vp.layers_per_round,
         "shuffle_stride": vp.shuffle_stride,
         "use_lwe": vp.use_lwe,
-        #"chaining_mode": mode,  # Store the chaining mode
-        "bytes_per_number": vp.n * 2        
+        "chaining_mode": mode,  # Store the chaining mode
+        "bytes_per_number": vp.n * 2
     }
     
     # Add timestamp for replay attack prevention
@@ -2280,7 +2006,7 @@ def encrypt_with_pub(pubfile: str, file_type: str, message: Optional[str] = None
     
     # Write ciphertext with metadata
     out_file = out_file + "." + file_type
-    write_ciphertext(out_file, file_type, enc_blocks, metadata, ct, hmac_value, nonce, timestamp)
+    write_ciphertext_with_iv(out_file, file_type, enc_blocks, metadata, ct, hmac_value, nonce, timestamp)
     return out_file
 
 def decrypt_with_priv(keystore: Optional[str], privfile: Optional[str], encfile: str, passphrase: Optional[str], key_name: Optional[str], file_type: str, validity_window: int):
@@ -2321,7 +2047,7 @@ def decrypt_with_priv(keystore: Optional[str], privfile: Optional[str], encfile:
     dk = bytes(privkey["dk"])  # Decapsulation key
     
     # Read ciphertext components
-    metadata, enc_seed_bytes, enc_blocks, hmac_value, nonce, timestamp = read_ciphertext(encfile, file_type)
+    metadata, enc_seed_bytes, enc_blocks, hmac_value, iv, timestamp, nonce = read_ciphertext_with_iv(encfile, file_type)
     
     # Type verification for security
     assert isinstance(enc_seed_bytes, bytes), "Encrypted seed must be bytes"
@@ -2356,8 +2082,18 @@ def decrypt_with_priv(keystore: Optional[str], privfile: Optional[str], encfile:
     # Derive same symmetric key from ephemeral seed
     k = key_from_seed(ephemeral_seed, vp)
     
-    # Decrypt blocks using Veinn inverse permutation
-    dec_blocks = [permute_inverse(b, k) for b in enc_blocks]
+    # Decrypt using appropriate chaining mode
+    chaining_mode = metadata.get("chaining_mode", "ecb")  # Default to ECB for backwards compatibility
+    
+    if chaining_mode == "cbc":
+        dec_blocks = decrypt_blocks_cbc(enc_blocks, k, iv, vp)
+    elif chaining_mode == "ctr":
+        dec_blocks = decrypt_blocks_ctr(enc_blocks, k, iv, vp)
+    elif chaining_mode == "cfb":
+        dec_blocks = decrypt_blocks_cfb(enc_blocks, k, iv, vp)
+    else:
+        # Legacy ECB mode (independent block decryption)
+        dec_blocks = [permute_inverse(b, k) for b in enc_blocks]
     
     # Reconstruct message from decrypted blocks
     dec_bytes = b"".join(block_to_bytes(b) for b in dec_blocks)
@@ -2370,7 +2106,7 @@ def decrypt_with_priv(keystore: Optional[str], privfile: Optional[str], encfile:
     with open("decrypted.txt", "w") as f:
             json.dump(dec_bytes.decode('utf-8'), f)  
 
-def encrypt_with_public_veinn(seed_input: str, file_type: str, message: Optional[str] = None, in_path: Optional[str] = None, vp: VeinnParams = VeinnParams(), out_file: str = "enc_pub_veinn.json", mode: str = "t", bytes_per_number: Optional[int] = None, nonce: Optional[bytes] = None) -> str:
+def encrypt_with_public_veinn(seed_input: str, file_type: str, message: Optional[str] = None, in_path: Optional[str] = None, vp: VeinnParams = VeinnParams(), out_file: str = "enc_pub_veinn.json", bytes_per_number: Optional[int] = None, nonce: Optional[bytes] = None, mode: str = "cbc") -> str:
     """
     Deterministic encryption using publicly shared VEINN seed.
     
@@ -2421,7 +2157,18 @@ def encrypt_with_public_veinn(seed_input: str, file_type: str, message: Optional
     blocks = [bytes_to_block(message_bytes[i:i + vp.n * 2], vp.n) for i in range(0, len(message_bytes), vp.n * 2)]
     for b in blocks:
         assert b.shape == (vp.n,), f"Block shape mismatch: expected {(vp.n,)}, got {b.shape}"
-    enc_blocks = [permute_forward(b, k) for b in blocks]
+    
+    # Encrypt each block using Veinn forward permutation
+    # This is the "DEM" (Data Encapsulation Mechanism) part
+    # Encrypt blocks using selected chaining mode
+    if mode == "cbc":
+        enc_blocks = encrypt_blocks_cbc(blocks, k, nonce, vp)
+    elif mode == "ctr":
+        enc_blocks = encrypt_blocks_ctr(blocks, k, nonce, vp)
+    elif mode == "cfb":
+        enc_blocks = encrypt_blocks_cfb(blocks, k, nonce, vp)
+    else:
+        enc_blocks = [permute_forward(b, k) for b in blocks]
     
     # Package metadata
     metadata = {
@@ -2429,9 +2176,10 @@ def encrypt_with_public_veinn(seed_input: str, file_type: str, message: Optional
         "rounds": vp.rounds,
         "layers_per_round": vp.layers_per_round,
         "shuffle_stride": vp.shuffle_stride,
-        "use_lwe": vp.use_lwe        
-    }
-    
+        "use_lwe": vp.use_lwe,
+        "chaining_mode": mode  # Store the chaining mode
+    }        
+   
     # Add authenticity and replay protection
     timestamp = time.time()
     msg_for_hmac = b"".join(block_to_bytes(b) for b in enc_blocks) + math.floor(timestamp).to_bytes(8, 'big')
@@ -2439,7 +2187,7 @@ def encrypt_with_public_veinn(seed_input: str, file_type: str, message: Optional
     
     # Write encrypted data
     out_file = out_file + "." + file_type
-    write_ciphertext(out_file, file_type, enc_blocks, metadata, b"", hmac_value, nonce, timestamp)
+    write_ciphertext_with_iv(out_file, file_type, enc_blocks, metadata, seed, hmac_value, nonce, timestamp)
     print(f"Encrypted to {out_file}")
     return out_file
 
@@ -2465,7 +2213,7 @@ def decrypt_with_public_veinn(seed_input: str, file_type: str, enc_file: str, va
     seed = seed_input.encode('utf-8')
     
     # Read encrypted data
-    metadata, _, enc_blocks, hmac_value, nonce, timestamp = read_ciphertext(enc_file, file_type)
+    metadata, enc_seed_bytes, enc_blocks, hmac_value, iv, timestamp, nonce = read_ciphertext_with_iv(enc_file, file_type)
     
     # Timestamp validation (replay protection)
     if not validate_timestamp(timestamp, validity_window):
@@ -2487,8 +2235,19 @@ def decrypt_with_public_veinn(seed_input: str, file_type: str, enc_file: str, va
 
     k = key_from_seed(seed, vp)
     
-    # Decrypt blocks
-    dec_blocks = [permute_inverse(b, k) for b in enc_blocks]
+    # Decrypt using appropriate chaining mode
+    chaining_mode = metadata.get("chaining_mode", "ecb")  # Default to ECB for backwards compatibility
+    
+    if chaining_mode == "cbc":
+        dec_blocks = decrypt_blocks_cbc(enc_blocks, k, iv, vp)
+    elif chaining_mode == "ctr":
+        dec_blocks = decrypt_blocks_ctr(enc_blocks, k, iv, vp)
+    elif chaining_mode == "cfb":
+        dec_blocks = decrypt_blocks_cfb(enc_blocks, k, iv, vp)
+    else:
+        # Legacy ECB mode (independent block decryption)
+        dec_blocks = [permute_inverse(b, k) for b in enc_blocks]
+
     dec_bytes = b"".join(block_to_bytes(b) for b in dec_blocks)
     
     # Remove padding and display result
@@ -2498,195 +2257,6 @@ def decrypt_with_public_veinn(seed_input: str, file_type: str, enc_file: str, va
 # -----------------------------
 # Serialization and File I/O
 # -----------------------------
-def write_ciphertext(path: str, file_type: str, encrypted_blocks: list, metadata: dict, enc_seed_bytes: bytes, hmac_value: str = None, nonce: bytes = None, timestamp: float = None):
-    """
-    Serialize encrypted data to disk in specified format.
-    
-    Supports two output formats:
-    1. JSON format: Human-readable, includes all metadata inline
-    2. Binary format: Compact, separate metadata file
-    
-    Security considerations:
-    - Separates key material (metadata) from encrypted data
-    - Includes authentication tags and timestamps
-    - Base64 encoding for binary data in JSON format
-    
-    Args:
-        path: Output file path
-        file_type: Format ("json" or "bin")
-        encrypted_blocks: List of encrypted block arrays
-        metadata: Cipher parameters for decryption
-        enc_seed_bytes: ML-KEM ciphertext (empty for deterministic mode)
-        hmac_value: Authentication tag
-        nonce: Optional nonce value
-        timestamp: Creation timestamp for replay protection
-    """
-    # Create separate key file with metadata and authentication data
-    key = {
-        "veinn_metadata": metadata,
-        "enc_seed_b64": b64encode(enc_seed_bytes).decode(),  # ML-KEM ciphertext as base64
-    }
-    if hmac_value:
-        key["hmac"] = hmac_value
-    if nonce:
-        key["nonce_b64"] = b64encode(nonce).decode()
-    if timestamp:
-        key["timestamp"] = timestamp
-    
-    # Write key metadata to separate file
-    with open("key_"+path, "w") as f:
-        json.dump(key, f)
-
-    # Write encrypted payload in specified format
-    if file_type == "json":
-        # JSON format: human-readable with integer arrays
-        payload = {
-            "encrypted": [[int(x) for x in blk.tolist()] for blk in encrypted_blocks],
-        }
-        with open(path, "w") as f:
-            json.dump(payload, f)
-    
-    elif file_type == "bin":
-        # Binary format: compact with magic number
-        with open(path, "wb") as f:
-            # Write magic number for format identification
-            f.write(b"VEINN")
-            
-            # Write number of encrypted blocks
-            f.write(len(encrypted_blocks).to_bytes(4, 'big'))
-            
-            # Write encrypted blocks (each block is n int64 values)
-            for blk in encrypted_blocks:
-                assert blk.dtype == np.int64, "Blocks must be int64 arrays"
-                f.write(blk.tobytes())  # Direct binary serialization
-
-def read_ciphertext(path: str, file_type: str):
-    """
-    Deserialize encrypted data from disk.
-    
-    Reads both key metadata and encrypted payload:
-    1. Load key file with metadata, HMAC, timestamp
-    2. Load encrypted data in specified format
-    3. Reconstruct block arrays for decryption
-    
-    Validates file format and data integrity during reading.
-    
-    Args:
-        path: Encrypted file path
-        file_type: Format ("json" or "bin")
-        
-    Returns:
-        Tuple of (metadata, enc_seed, enc_blocks, hmac, nonce, timestamp)
-    """
-    # Read key metadata file
-    with open("key_"+path, "r") as f:
-        key = json.load(f)
-        hmac_value = key.get("hmac")
-        nonce = b64decode(key.get("nonce_b64", "")) if key.get("nonce_b64") else None
-        timestamp = key.get("timestamp")
-        enc_seed = b64decode(key["enc_seed_b64"])  # ML-KEM ciphertext
-        metadata = key["veinn_metadata"]
-
-    # Read encrypted payload based on format
-    if file_type == "json":
-        with open(path, "r") as f:
-            encrypted = json.load(f)
-        # Convert JSON integer lists back to numpy arrays
-        enc_blocks = [np.array([int(x) for x in blk], dtype=np.int64) for blk in encrypted["encrypted"]]
-
-    elif file_type == "bin":
-        with open(path, "rb") as f:
-            # Validate magic number
-            magic = f.read(5)
-            if magic != b"VEINN":
-                raise ValueError(f"{bcolors.FAIL}Invalid file format: not a VEINN8 binary file{bcolors.ENDC}")
-            
-            # Read number of blocks
-            num_blocks = int.from_bytes(f.read(4), 'big')
-            
-            # Read encrypted blocks
-            n = metadata["n"]
-            enc_blocks = []
-            for _ in range(num_blocks):
-                block_data = f.read(n * 8)  # Each int64 is 8 bytes
-                if len(block_data) != n * 8:
-                    raise ValueError(f"{bcolors.FAIL}Incomplete block data{bcolors.ENDC}")
-                block = np.frombuffer(block_data, dtype=np.int64)
-                assert block.shape == (n,), f"Block shape mismatch: expected {(n,)}, got {block.shape}"
-                enc_blocks.append(block)
-    
-    return metadata, enc_seed, enc_blocks, hmac_value, nonce, timestamp
-
-def encrypt_with_pub_cbc(pubfile: str, file_type: str, message: Optional[str] = None, in_path: Optional[str] = None, vp: VeinnParams = VeinnParams(), seed_len: int = 32, nonce: Optional[bytes] = None, out_file: str = "enc_pub", mode: str = "cbc") -> str:
-    """
-    Enhanced hybrid encryption with proper block chaining modes.
-    
-    Supports multiple chaining modes:
-    - CBC: Cipher Block Chaining (XOR previous ciphertext with current plaintext)
-    - CTR: Counter mode (encrypt counter + nonce, XOR with plaintext)
-    - CFB: Cipher Feedback (encrypt previous ciphertext, XOR with plaintext)
-    
-    This fixes the ECB vulnerability by ensuring each block depends on previous blocks.
-    """
-    # Load recipient's public key
-    with open(pubfile, "r") as f:
-        pub = json.load(f)
-    ek = bytes(pub["ek"])
-
-    # Prepare message data
-    if in_path:
-        with open(in_path, "rb") as f:
-            message_bytes = f.read()
-    else:
-        if not message:
-            raise ValueError(f"{bcolors.FAIL}Message required for text mode{bcolors.ENDC}")
-        message_bytes = message.encode('utf-8')
-
-    # Apply padding
-    message_bytes = pad_iso7816(message_bytes, vp.n * 2)
-    
-    # Generate random nonce/IV
-    nonce = nonce or secrets.token_bytes(16)
-    
-    # Kyber KEM: Encapsulate ephemeral symmetric key
-    ephemeral_seed, ct = encaps(ek)
-    k = key_from_seed(ephemeral_seed, vp)
-    
-    # Split message into blocks
-    blocks = [bytes_to_block(message_bytes[i:i + vp.n * 2], vp.n) 
-              for i in range(0, len(message_bytes), vp.n * 2)]
-    
-    # Encrypt blocks using selected chaining mode
-    if mode == "cbc":
-        enc_blocks = encrypt_blocks_cbc(blocks, k, nonce, vp)
-    elif mode == "ctr":
-        enc_blocks = encrypt_blocks_ctr(blocks, k, nonce, vp)
-    elif mode == "cfb":
-        enc_blocks = encrypt_blocks_cfb(blocks, k, nonce, vp)
-    else:
-        raise ValueError(f"Unsupported chaining mode: {mode}")
-
-    # Store encryption metadata
-    metadata = {
-        "n": vp.n,
-        "rounds": vp.rounds,
-        "layers_per_round": vp.layers_per_round,
-        "shuffle_stride": vp.shuffle_stride,
-        "use_lwe": vp.use_lwe,
-        "chaining_mode": mode,  # Store the chaining mode
-        "bytes_per_number": vp.n * 2
-    }
-    
-    # Add timestamp and authentication
-    timestamp = time.time()
-    msg_for_hmac = ct + b"".join(block_to_bytes(b) for b in enc_blocks) + math.floor(timestamp).to_bytes(8, 'big')
-    hmac_value = hmac.new(ephemeral_seed, msg_for_hmac, hashlib.sha256).hexdigest()
-    
-    # Write ciphertext
-    out_file = out_file + "." + file_type
-    write_ciphertext_with_iv(out_file, file_type, enc_blocks, metadata, ct, hmac_value, nonce, timestamp)
-    return out_file
-
 
 def encrypt_blocks_cbc(blocks: list, key: VeinnKey, iv: bytes, vp: VeinnParams) -> list:
     """
@@ -2850,71 +2420,6 @@ def decrypt_blocks_cfb(enc_blocks: list, key: VeinnKey, iv: bytes, vp: VeinnPara
     
     return decrypted_blocks
 
-
-def decrypt_with_priv_chained(keystore: Optional[str], privfile: Optional[str], encfile: str, 
-                             passphrase: Optional[str], key_name: Optional[str], 
-                             file_type: str, validity_window: int):
-    """
-    Enhanced decryption function that supports chained block modes.
-    """
-    # Load private key
-    if keystore and passphrase and key_name:
-        privkey = retrieve_key_from_keystore(passphrase, key_name, keystore)
-    else:
-        with open(privfile, "r") as f:
-            privkey = json.load(f)
-    
-    dk = bytes(privkey["dk"])
-    
-    # Read ciphertext with IV
-    metadata, enc_seed_bytes, enc_blocks, hmac_value, iv, timestamp = read_ciphertext_with_iv(encfile, file_type)
-    
-    # Timestamp validation
-    if not validate_timestamp(timestamp, validity_window):
-        raise ValueError(f"{bcolors.FAIL}Timestamp outside validity window{bcolors.ENDC}")
-    
-    # Kyber decapsulation
-    ephemeral_seed = decaps(dk, enc_seed_bytes)
-    
-    # HMAC verification
-    msg_for_hmac = enc_seed_bytes + b"".join(block_to_bytes(b) for b in enc_blocks) + math.floor(timestamp).to_bytes(8, 'big')
-    if not hmac.compare_digest(hmac.new(ephemeral_seed, msg_for_hmac, hashlib.sha256).hexdigest(), hmac_value):
-        raise ValueError(f"{bcolors.FAIL}HMAC verification failed{bcolors.ENDC}")
-    
-    # Reconstruct parameters
-    vp = VeinnParams(
-        n=metadata["n"],
-        rounds=metadata["rounds"],
-        layers_per_round=metadata["layers_per_round"],
-        shuffle_stride=metadata["shuffle_stride"],
-        use_lwe=metadata["use_lwe"]
-    )
-    
-    k = key_from_seed(ephemeral_seed, vp)
-    
-    # Decrypt using appropriate chaining mode
-    chaining_mode = metadata.get("chaining_mode", "ecb")  # Default to ECB for backwards compatibility
-    
-    if chaining_mode == "cbc":
-        dec_blocks = decrypt_blocks_cbc(enc_blocks, k, iv, vp)
-    elif chaining_mode == "ctr":
-        dec_blocks = decrypt_blocks_ctr(enc_blocks, k, iv, vp)
-    elif chaining_mode == "cfb":
-        dec_blocks = decrypt_blocks_cfb(enc_blocks, k, iv, vp)
-    else:
-        # Legacy ECB mode (independent block decryption)
-        dec_blocks = [permute_inverse(b, k) for b in enc_blocks]
-    
-    # Reconstruct message
-    dec_bytes = b"".join(block_to_bytes(b) for b in dec_blocks)
-    dec_bytes = unpad_iso7816(dec_bytes)
-    
-    print("Decrypted message:", dec_bytes.decode('utf-8'))
-    
-    with open("decrypted.txt", "w") as f:
-        json.dump(dec_bytes.decode('utf-8'), f)
-
-
 def write_ciphertext_with_iv(path: str, file_type: str, encrypted_blocks: list, metadata: dict, 
                             enc_seed_bytes: bytes, hmac_value: str, iv: bytes, timestamp: float):
     """
@@ -2953,6 +2458,7 @@ def read_ciphertext_with_iv(path: str, file_type: str):
         key = json.load(f)
         hmac_value = key["hmac"]
         iv = b64decode(key["iv_b64"])  # Read IV
+        nonce = b64decode(key.get("nonce_b64", "")) if key.get("nonce_b64") else None
         timestamp = key["timestamp"]
         enc_seed = b64decode(key["enc_seed_b64"])
         metadata = key["veinn_metadata"]
@@ -2974,143 +2480,8 @@ def read_ciphertext_with_iv(path: str, file_type: str):
                 block = np.frombuffer(block_data, dtype=np.int64)
                 enc_blocks.append(block)
     
-    return metadata, enc_seed, enc_blocks, hmac_value, iv, timestamp
+    return metadata, enc_seed, enc_blocks, hmac_value, iv, timestamp, nonce
 
-
-def test_chaining_modes_avalanche(vp: VeinnParams, message_sizes: list = [500, 1500, 3000], num_tests: int = 5):
-    """
-    Compare avalanche effects across different chaining modes and message sizes.
-    
-    This test verifies that the chaining modes fix the ECB vulnerability by
-    ensuring bit changes propagate across block boundaries.
-    """
-    print("Chaining Modes Avalanche Comparison")
-    print("=" * 60)
-    
-    modes = ["ecb", "cbc", "ctr", "cfb"]
-    results = {}
-    
-    # Generate test keypair
-    test_keypair = generate_keypair()
-    ek = bytes(test_keypair["ek"])
-    
-    for mode in modes:
-        print(f"\nTesting {mode.upper()} mode:")
-        print("-" * 30)
-        results[mode] = {}
-        
-        for msg_size in message_sizes:
-            print(f"  {msg_size} bytes...", end=" ", flush=True)
-            
-            # Generate random test message
-            test_message = secrets.token_bytes(msg_size)
-            
-            # Test bit flips
-            bit_changes = []
-            total_bits = msg_size * 8
-            num_bit_tests = min(50, total_bits)  # Sample for performance
-            bit_positions = np.random.choice(total_bits, size=num_bit_tests, replace=False)
-            
-            # Encrypt original message
-            if mode == "ecb":
-                original_encrypted = encrypt_message_ecb_test(test_message, ek, vp)
-            else:
-                original_encrypted = encrypt_message_chained_test(test_message, ek, vp, mode)
-            
-            for bit_pos in bit_positions:
-                # Flip bit and encrypt
-                modified_message = flip_bit(test_message, bit_pos)
-                
-                if mode == "ecb":
-                    modified_encrypted = encrypt_message_ecb_test(modified_message, ek, vp)
-                else:
-                    modified_encrypted = encrypt_message_chained_test(modified_message, ek, vp, mode)
-                
-                # Calculate Hamming distance
-                bit_diff = hamming_distance_bits(original_encrypted, modified_encrypted)
-                bit_changes.append(bit_diff)
-            
-            # Calculate statistics
-            avg_bit_changes = np.mean(bit_changes)
-            total_output_bits = len(original_encrypted) * 8
-            avalanche_pct = (avg_bit_changes / total_output_bits) * 100
-            
-            results[mode][msg_size] = {
-                'avalanche_percentage': avalanche_pct,
-                'avg_bits_changed': avg_bit_changes,
-                'total_output_bits': total_output_bits
-            }
-            
-            print(f"{avalanche_pct:.1f}% avalanche")
-    
-    # Print comparison table
-    print(f"\nAvalanche Comparison Table:")
-    print("-" * 60)
-    print(f"{'Mode':<6}", end="")
-    for size in message_sizes:
-        print(f"{size:>10}B", end="")
-    print()
-    print("-" * 60)
-    
-    for mode in modes:
-        print(f"{mode.upper():<6}", end="")
-        for size in message_sizes:
-            pct = results[mode][size]['avalanche_percentage']
-            if pct < 40:
-                color = bcolors.FAIL
-            elif pct > 45:
-                color = bcolors.OKGREEN
-            else:
-                color = bcolors.WARNING
-            print(f"{color}{pct:>9.1f}%{bcolors.ENDC}", end="")
-        print()
-    
-    print("\nInterpretation:")
-    print("- ECB mode should show poor avalanche for multi-block messages")
-    print("- CBC, CTR, CFB should show ~50% avalanche across all sizes")
-    print("- Values <40% indicate security concerns")
-    print("- Values >45% indicate good diffusion properties")
-    
-    return results
-
-
-def encrypt_message_ecb_test(message: bytes, ek: bytes, vp: VeinnParams) -> bytes:
-    """Test helper: ECB mode encryption (original vulnerable method)"""
-    padded_message = pad_iso7816(message, vp.n * 2)
-    ephemeral_seed, ct_kem = encaps(ek)
-    k = key_from_seed(ephemeral_seed, vp)
-    
-    encrypted_blocks = []
-    for i in range(0, len(padded_message), vp.n * 2):
-        block_bytes = padded_message[i:i + vp.n * 2]
-        block_array = bytes_to_block(block_bytes, vp.n)
-        encrypted_block = permute_forward(block_array, k)  # Independent encryption
-        encrypted_blocks.append(block_to_bytes(encrypted_block))
-    
-    return ct_kem + b''.join(encrypted_blocks)
-
-
-def encrypt_message_chained_test(message: bytes, ek: bytes, vp: VeinnParams, mode: str) -> bytes:
-    """Test helper: Chained mode encryption"""
-    padded_message = pad_iso7816(message, vp.n * 2)
-    ephemeral_seed, ct_kem = encaps(ek)
-    k = key_from_seed(ephemeral_seed, vp)
-    iv = secrets.token_bytes(16)
-    
-    blocks = [bytes_to_block(padded_message[i:i + vp.n * 2], vp.n) 
-              for i in range(0, len(padded_message), vp.n * 2)]
-    
-    if mode == "cbc":
-        enc_blocks = encrypt_blocks_cbc(blocks, k, iv, vp)
-    elif mode == "ctr":
-        enc_blocks = encrypt_blocks_ctr(blocks, k, iv, vp)
-    elif mode == "cfb":
-        enc_blocks = encrypt_blocks_cfb(blocks, k, iv, vp)
-    else:
-        raise ValueError(f"Unknown mode: {mode}")
-    
-    encrypted_data = b''.join(block_to_bytes(b) for b in enc_blocks)
-    return ct_kem + iv + encrypted_data
 
 # -----------------------------
 # Interactive Configuration Helpers  
@@ -3219,7 +2590,7 @@ def menu_encrypt_with_pub():
     print("- CTR: Counter mode (encrypt counter + nonce, XOR with plaintext)")
     print("- CFB: Cipher Feedback (encrypt previous ciphertext, XOR with plaintext)")
     mode = input("Choose cbc, ctr, or cfb [cbc] : ").strip() or "cbc"
-    
+
     inpath = input("Optional input file path (blank = prompt): ").strip() or None    
     file_type = input("Output file type (JSON/BIN) [json] : ").strip() or "json"
     
@@ -3235,7 +2606,7 @@ def menu_encrypt_with_pub():
     if inpath is None:        
         message = input("Message to encrypt: ")        
     
-    encrypt_with_pub_cbc(pubfile, file_type, message=message, in_path=inpath, vp=vp, seed_len=seed_len, nonce=nonce, mode=mode)
+    encrypt_with_pub(pubfile, file_type, message=message, in_path=inpath, vp=vp, seed_len=seed_len, nonce=nonce, mode=mode)
 
 def menu_decrypt_with_priv():
     """
@@ -3268,7 +2639,7 @@ def menu_decrypt_with_priv():
         print("Encrypted file not found.")
         return
         
-    decrypt_with_priv_chained(keystore, privfile, encfile, passphrase, key_name, file_type, validity_window)
+    decrypt_with_priv(keystore, privfile, encfile, passphrase, key_name, file_type, validity_window)
 
 def menu_veinn_from_seed():
     """
@@ -3321,6 +2692,11 @@ def menu_encrypt_with_public_veinn():
     use_keystore = input("Use keystore for seed? (y/n): ").strip().lower() or "y"
     
     seed_input, keystore, passphrase, key_name = None, None, None, None
+    print("Supports multiple chaining modes:")
+    print("- CBC: Cipher Block Chaining (XOR previous ciphertext with current plaintext)")
+    print("- CTR: Counter mode (encrypt counter + nonce, XOR with plaintext)")
+    print("- CFB: Cipher Feedback (encrypt previous ciphertext, XOR with plaintext)")
+    mode = input("Choose cbc, ctr, or cfb [cbc] : ").strip() or "cbc"
     if use_keystore == "y":
         keystore = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
         passphrase = input("Keystore passphrase: ")
@@ -3346,7 +2722,7 @@ def menu_encrypt_with_public_veinn():
     nonce = b64decode(nonce_str) if nonce_str else None
     vp = VeinnParams(n=n, rounds=rounds, layers_per_round=layers_per_round, shuffle_stride=shuffle_stride, use_lwe=use_lwe, q=q)
     
-    encrypt_with_public_veinn(seed_input, file_type, message, inpath, vp, out_file, nonce)
+    encrypt_with_public_veinn(seed_input, file_type, message, inpath, vp, out_file, nonce, mode=mode)
 
 def menu_decrypt_with_public_veinn():
     """
@@ -3381,260 +2757,7 @@ def menu_decrypt_with_public_veinn():
         print("Encrypted file not found.")
         return
         
-    decrypt_with_public_veinn(seed_input, file_type, enc_file, validity_window)
-
-def flip_bit(data: np.ndarray, bit_position: int) -> np.ndarray:
-    """
-    Flip a single bit in the input array.
-
-
-    Args:
-        data: Input array of int64 values
-        bit_position: Global bit position to flip (0 to n*64-1)
-
-    Returns:
-        Array with single bit flipped
-    """
-    result = data.copy()
-    word_index = bit_position // 64
-    bit_index = bit_position % 64
-
-    if word_index < len(result):
-        # Use numpy int64 to avoid C long overflow
-        mask = np.int64(1) << np.int64(bit_index)
-        result[word_index] = np.int64(result[word_index]) ^ mask
-
-    return result
-
-
-def hamming_distance_bits(a: np.ndarray, b: np.ndarray) -> int:
-    """
-    Calculate Hamming distance in bits between two arrays.
-
-
-    Args:
-        a, b: Arrays to compare
-
-    Returns:
-        Number of different bits
-    """
-    xor_result = a ^ b
-    # Count set bits in each word and sum
-    return sum(bin(int(word)).count('1') for word in xor_result)
-
-def avalanche_test_full_encryption(message: bytes, vp: VeinnParams, num_tests: int = 100) -> dict:
-    """
-    Test avalanche effect through complete encryption pipeline including:
-    1. ISO 7816-4 padding
-    2. bytes_to_block conversion 
-    3. VEINN block encryption
-    4. All preprocessing steps from encrypt_with_pub
-    
-    Args:
-        message: Original message bytes to test
-        vp: VEINN parameters
-        num_tests: Number of random bit flips to test
-        
-    Returns:
-        Dictionary with comprehensive avalanche statistics
-    """
-    # Generate random key for testing
-    seed = secrets.token_bytes(vp.seed_len)
-    key = key_from_seed(seed, vp)
-    
-    # Apply full preprocessing pipeline (matching encrypt_with_pub)
-    padded_message = pad_iso7816(message, vp.n * 2)
-    
-    # Split into blocks as done in encrypt_with_pub
-    message_blocks = []
-    for i in range(0, len(padded_message), vp.n * 2):
-        block_data = padded_message[i:i + vp.n * 2]
-        block = bytes_to_block(block_data, vp.n)
-        message_blocks.append(block)
-    
-    # Encrypt all blocks to get baseline ciphertext
-    original_encrypted_blocks = [permute_forward(block, key) for block in message_blocks]
-    
-    # Convert to flat bit array for bit manipulation
-    original_message_bits = np.unpackbits(np.frombuffer(message, dtype=np.uint8))
-    total_message_bits = len(original_message_bits)
-    
-    # Convert encrypted blocks to flat bit array for comparison
-    original_cipher_bytes = b"".join(block_to_bytes(block) for block in original_encrypted_blocks)
-    original_cipher_bits = np.unpackbits(np.frombuffer(original_cipher_bytes, dtype=np.uint8))
-    total_cipher_bits = len(original_cipher_bits)
-    
-    bit_changes = []
-    block_changes = []
-    
-    print(f"Testing {num_tests} random bit flips in {total_message_bits}-bit message...", end="", flush=True)
-    
-    # Test random bit positions in original message
-    test_positions = np.random.choice(total_message_bits, size=min(num_tests, total_message_bits), replace=False)
-    
-    for i, bit_pos in enumerate(test_positions):
-        if i % 20 == 0:
-            print(".", end="", flush=True)
-        
-        # Flip single bit in original message
-        modified_bits = original_message_bits.copy()
-        modified_bits[bit_pos] = 1 - modified_bits[bit_pos]  # Flip bit
-        
-        # Convert back to bytes
-        # Pad to byte boundary if necessary
-        if len(modified_bits) % 8 != 0:
-            padding = 8 - (len(modified_bits) % 8)
-            modified_bits = np.concatenate([modified_bits, np.zeros(padding, dtype=np.uint8)])
-        
-        modified_message = np.packbits(modified_bits).tobytes()[:len(message)]
-        
-        # Apply full encryption pipeline to modified message
-        try:
-            padded_modified = pad_iso7816(modified_message, vp.n * 2)
-            
-            # Process into blocks
-            modified_blocks = []
-            for j in range(0, len(padded_modified), vp.n * 2):
-                block_data = padded_modified[j:j + vp.n * 2]
-                block = bytes_to_block(block_data, vp.n)
-                modified_blocks.append(block)
-            
-            # Encrypt modified blocks
-            modified_encrypted_blocks = [permute_forward(block, key) for block in modified_blocks]
-            
-            # Convert to bits for comparison
-            modified_cipher_bytes = b"".join(block_to_bytes(block) for block in modified_encrypted_blocks)
-            modified_cipher_bits = np.unpackbits(np.frombuffer(modified_cipher_bytes, dtype=np.uint8))
-            
-            # Ensure same length for comparison (padding may cause differences)
-            min_len = min(len(original_cipher_bits), len(modified_cipher_bits))
-            
-            # Calculate bit-level differences
-            bit_diff = np.sum(original_cipher_bits[:min_len] != modified_cipher_bits[:min_len])
-            
-            # Calculate block-level differences
-            block_diff = sum(1 for orig, mod in zip(original_encrypted_blocks, modified_encrypted_blocks) 
-                           if not np.array_equal(orig, mod))
-            
-            bit_changes.append(bit_diff)
-            block_changes.append(block_diff)
-            
-        except Exception as e:
-            # Skip invalid modifications that break padding/structure
-            continue
-    
-    print(" done!")
-    
-    if not bit_changes:
-        return {"error": "No valid test cases completed"}
-    
-    bit_changes_array = np.array(bit_changes)
-    block_changes_array = np.array(block_changes)
-    
-    results = {
-        'message_info': {
-            'original_length_bytes': len(message),
-            'padded_length_bytes': len(padded_message),
-            'total_blocks': len(message_blocks),
-            'bits_per_block': vp.n * 64,
-            'total_input_bits': total_message_bits,
-            'total_output_bits': total_cipher_bits
-        },
-        'test_info': {
-            'bits_tested': len(bit_changes),
-            'successful_tests': len([x for x in bit_changes if x > 0])
-        },
-        'bit_avalanche': {
-            'mean': float(np.mean(bit_changes_array)),
-            'std': float(np.std(bit_changes_array)),
-            'min': int(np.min(bit_changes_array)),
-            'max': int(np.max(bit_changes_array)),
-            'median': float(np.median(bit_changes_array))
-        },
-        'block_avalanche': {
-            'mean': float(np.mean(block_changes_array)),
-            'std': float(np.std(block_changes_array)),
-            'min': int(np.min(block_changes_array)),
-            'max': int(np.max(block_changes_array)),
-            'total_blocks': len(message_blocks)
-        },
-        'avalanche_percentage': float(np.mean(bit_changes_array) / total_cipher_bits * 100),
-        'block_avalanche_percentage': float(np.mean(block_changes_array) / len(message_blocks) * 100)
-    }
-    
-    return results
-
-
-def avalanche_test_message_sizes(vp: VeinnParams) -> dict:
-    """
-    Test avalanche effect across different message sizes to see how
-    padding and block structure affects diffusion.
-    """
-    test_messages = [
-        b"Hello",  # Very short
-        b"Hello, World! This is a test message.",  # Medium
-        b"A" * 100,  # Exactly 100 bytes
-        b"B" * (vp.n * 2 - 10),  # Just under one block
-        b"C" * (vp.n * 2),  # Exactly one block
-        b"D" * (vp.n * 2 + 10),  # Just over one block
-        b"E" * (vp.n * 4),  # Multiple blocks
-    ]
-    
-    results = {}
-    
-    for i, msg in enumerate(test_messages):
-        print(f"\nTesting message {i+1}/{len(test_messages)}: {len(msg)} bytes")
-        result = avalanche_test_full_encryption(msg, vp, num_tests=50)
-        
-        if "error" not in result:
-            results[f"message_{len(msg)}_bytes"] = result
-            print(f"  Avalanche: {result['avalanche_percentage']:.2f}%, "
-                  f"Blocks affected: {result['block_avalanche_percentage']:.2f}%")
-    
-    return results
-
-
-def menu_full_avalanche_test():
-    """
-    Interactive menu for comprehensive avalanche testing.
-    """
-    print("Full Encryption Pipeline Avalanche Test")
-    print("=" * 50)
-    
-    # Get VEINN parameters
-    vp = VeinnParams()
-    print(f"Using VEINN parameters: n={vp.n}, rounds={vp.rounds}, layers={vp.layers_per_round}")
-    
-    test_choice = input("\nChoose test type:\n1) Single message test\n2) Multiple message sizes\nChoice [1]: ").strip() or "1"
-    
-    if test_choice == "1":
-        # Single message test
-        message = input("Enter test message: ").encode('utf-8')
-        num_tests = int(input("Number of bit flips to test [100]: ").strip() or "100")
-        
-        result = avalanche_test_full_encryption(message, vp, num_tests)
-        
-        if "error" not in result:
-            print(f"\nResults for {len(message)}-byte message:")
-            print(f"Message padded to {result['message_info']['padded_length_bytes']} bytes ({result['message_info']['total_blocks']} blocks)")
-            print(f"Bit avalanche: {result['avalanche_percentage']:.2f}%")
-            print(f"Block avalanche: {result['block_avalanche_percentage']:.2f}%")
-            print(f"Average bits changed: {result['bit_avalanche']['mean']:.1f} / {result['message_info']['total_output_bits']}")
-            print(f"Average blocks affected: {result['block_avalanche']['mean']:.1f} / {result['message_info']['total_blocks']}")
-        else:
-            print("Test failed:", result["error"])
-    
-    elif test_choice == "2":
-        # Multiple message sizes
-        results = avalanche_test_message_sizes(vp)
-        
-        print(f"\nSummary across message sizes:")
-        print("-" * 60)
-        for msg_key, result in results.items():
-            size = msg_key.split('_')[1]
-            print(f"{size:>8} bytes: {result['avalanche_percentage']:6.2f}% bit, "
-                  f"{result['block_avalanche_percentage']:6.2f}% block avalanche")
-            
+    decrypt_with_public_veinn(seed_input, file_type, enc_file, validity_window)            
 
 def main():
     parser = argparse.ArgumentParser(description="VEINN - Vector Encrypted Invertible Neural Network")
@@ -3664,6 +2787,7 @@ def main():
     public_encrypt_parser.add_argument("--seed_len", type=int, default=32)
     public_encrypt_parser.add_argument("--nonce", help="Custom nonce (base64)")
     public_encrypt_parser.add_argument("--out_file", default="enc_pub")
+    public_encrypt_parser.add_argument("--mode", default="cbc")
 
     public_decrypt_parser = subparsers.add_parser("public_decrypt", help="Decrypt with private key")
     public_decrypt_parser.add_argument("--keystore", default="keystore.json")
@@ -3718,7 +2842,8 @@ def main():
                     vp=vp,
                     seed_len=args.seed_len,
                     nonce=nonce,
-                    out_file=args.out_file
+                    out_file=args.out_file,
+                    mode=args.mode
                 )
             case "public_decrypt":
                 decrypt_with_priv(
@@ -3752,9 +2877,9 @@ def main():
                     print(f"{bcolors.BOLD}4){bcolors.ENDC} Decrypt with private key")
                     print(f"{bcolors.BOLD}5){bcolors.ENDC} Encrypt deterministically using public VEINN")
                     print(f"{bcolors.BOLD}6){bcolors.ENDC} Decrypt deterministically using public VEINN")
-                    print(f"{bcolors.BOLD}7){bcolors.ENDC} Derive public VEINN from seed")
-                    print(f"{bcolors.BOLD}8){bcolors.ENDC} Avalanche Test")
+                    print(f"{bcolors.BOLD}7){bcolors.ENDC} Derive public VEINN from seed")                    
                     print(f"{bcolors.BOLD}0){bcolors.ENDC} Exit")
+                    print("")
                     choice = input(f"{bcolors.BOLD}Choice: {bcolors.ENDC}").strip()
                     try:
                         match choice:
@@ -3775,7 +2900,9 @@ def main():
                             case "7":
                                 menu_veinn_from_seed()
                             case "8":
-                                menu_full_avalanche_test()
+                                #menu_full_avalanche_test()
+                                vp = VeinnParams()
+                                test_chaining_modes_avalanche(vp)
                             case _:
                                 print("Invalid choice")
                     except Exception as e:

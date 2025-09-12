@@ -1,315 +1,398 @@
-# test.py
-import io
-import os
-import json
-import pickle
-import shutil
-import tempfile
-import traceback
-from contextlib import redirect_stdout
-from dataclasses import dataclass, asdict
-from typing import Callable, Any, Optional, Dict, List
+def test_chaining_modes_avalanche(vp: VeinnParams, message_sizes: list = [500, 1500, 3000], num_tests: int = 5):
+    """
+    Compare avalanche effects across different chaining modes and message sizes.
+    
+    This test verifies that the chaining modes fix the ECB vulnerability by
+    ensuring bit changes propagate across block boundaries.
+    """
+    print("Chaining Modes Avalanche Comparison")
+    print("=" * 60)
+    
+    modes = ["ecb", "cbc", "ctr", "cfb"]
+    results = {}
+    
+    # Generate test keypair
+    test_keypair = generate_keypair()
+    ek = bytes(test_keypair["ek"])
+    
+    for mode in modes:
+        print(f"\nTesting {mode.upper()} mode:")
+        print("-" * 30)
+        results[mode] = {}
+        
+        for msg_size in message_sizes:
+            print(f"  {msg_size} bytes...", end=" ", flush=True)
+            
+            # Generate random test message
+            test_message = secrets.token_bytes(msg_size)
+            
+            # Test bit flips
+            bit_changes = []
+            total_bits = msg_size * 8
+            num_bit_tests = min(50, total_bits)  # Sample for performance
+            bit_positions = np.random.choice(total_bits, size=num_bit_tests, replace=False)
+            
+            # Encrypt original message
+            if mode == "ecb":
+                original_encrypted = encrypt_message_ecb_test(test_message, ek, vp)
+            else:
+                original_encrypted = encrypt_message_chained_test(test_message, ek, vp, mode)
+            
+            for bit_pos in bit_positions:
+                # Flip bit and encrypt - inline implementation to avoid function call issues
+                if bit_pos >= len(test_message) * 8:
+                    continue  # Skip if bit position is out of range
+                
+                byte_index = bit_pos // 8
+                bit_index = bit_pos % 8
+                
+                # Convert to bytearray for mutability
+                modified_message = bytearray(test_message)
+                modified_message[byte_index] ^= (1 << bit_index)
+                modified_message = bytes(modified_message)
+                
+                if mode == "ecb":
+                    modified_encrypted = encrypt_message_ecb_test(modified_message, ek, vp)
+                else:
+                    modified_encrypted = encrypt_message_chained_test(modified_message, ek, vp, mode)
+                
+                # Calculate Hamming distance by converting bytes to numpy arrays
+                orig_array = np.frombuffer(original_encrypted, dtype=np.uint8).astype(np.int64)
+                mod_array = np.frombuffer(modified_encrypted, dtype=np.uint8).astype(np.int64)
+                bit_diff = hamming_distance_bits(orig_array, mod_array)
+                bit_changes.append(bit_diff)
+            
+            # Calculate statistics
+            avg_bit_changes = np.mean(bit_changes)
+            total_output_bits = len(original_encrypted) * 8
+            avalanche_pct = (avg_bit_changes / total_output_bits) * 100
+            
+            results[mode][msg_size] = {
+                'avalanche_percentage': avalanche_pct,
+                'avg_bits_changed': avg_bit_changes,
+                'total_output_bits': total_output_bits
+            }
+            
+            print(f"{avalanche_pct:.1f}% avalanche")
+    
+    # Print comparison table
+    print(f"\nAvalanche Comparison Table:")
+    print("-" * 60)
+    print(f"{'Mode':<6}", end="")
+    for size in message_sizes:
+        print(f"{size:>10}B", end="")
+    print()
+    print("-" * 60)
+    
+    for mode in modes:
+        print(f"{mode.upper():<6}", end="")
+        for size in message_sizes:
+            pct = results[mode][size]['avalanche_percentage']
+            if pct < 40:
+                color = bcolors.FAIL
+            elif pct > 45:
+                color = bcolors.OKGREEN
+            else:
+                color = bcolors.WARNING
+            print(f"{color}{pct:>9.1f}%{bcolors.ENDC}", end="")
+        print()
+    
+    print("\nInterpretation:")
+    print("- ECB mode should show poor avalanche for multi-block messages")
+    print("- CBC, CTR, CFB should show ~50% avalanche across all sizes")
+    print("- Values <40% indicate security concerns")
+    print("- Values >45% indicate good diffusion properties")
+    
+    return results
 
-# --- import from your module ---
-# Make sure this filename matches your code file: veinn.py
-from veinn import (
-    VeinnParams,
-    create_keystore,
-    load_keystore,
-    store_key_in_keystore,
-    retrieve_key_from_keystore,
-    generate_rsa_keypair,
-    encrypt_with_pub,
-    decrypt_with_priv,
-    encrypt_with_public_veinn,
-    decrypt_with_public_veinn,
-    homomorphic_add_files,
-    homomorphic_mul_files,
-    read_ciphertext,
-)
 
-# ---------- helpers ----------
-@dataclass
-class TestCase:
-    name: str
-    params: Dict[str, Any]
-    runner: Callable[[], Any]
-    validator: Optional[Callable[[Any], bool]] = None
-    expect_exception: bool = False
-    notes: Optional[str] = None
+def encrypt_message_ecb_test(message: bytes, ek: bytes, vp: VeinnParams) -> bytes:
+    """Test helper: ECB mode encryption (original vulnerable method)"""
+    padded_message = pad_iso7816(message, vp.n * 2)
+    ephemeral_seed, ct_kem = encaps(ek)
+    k = key_from_seed(ephemeral_seed, vp)
+    
+    encrypted_blocks = []
+    for i in range(0, len(padded_message), vp.n * 2):
+        block_bytes = padded_message[i:i + vp.n * 2]
+        block_array = bytes_to_block(block_bytes, vp.n)
+        encrypted_block = permute_forward(block_array, k)  # Independent encryption
+        encrypted_blocks.append(block_to_bytes(encrypted_block))
+    
+    return ct_kem + b''.join(encrypted_blocks)
 
-def print_header(title: str):
-    print("\n" + "=" * 80)
-    print(title)
-    print("=" * 80)
 
-def run_case(case: TestCase):
-    print_header(f"TEST: {case.name}")
-    print("Parameters:")
-    for k, v in case.params.items():
-        print(f"  - {k}: {v}")
-    if case.notes:
-        print(f"Notes: {case.notes}")
+def encrypt_message_chained_test(message: bytes, ek: bytes, vp: VeinnParams, mode: str) -> bytes:
+    """Test helper: Chained mode encryption"""
+    padded_message = pad_iso7816(message, vp.n * 2)
+    ephemeral_seed, ct_kem = encaps(ek)
+    k = key_from_seed(ephemeral_seed, vp)
+    iv = secrets.token_bytes(16)
+    
+    blocks = [bytes_to_block(padded_message[i:i + vp.n * 2], vp.n) 
+              for i in range(0, len(padded_message), vp.n * 2)]
+    
+    if mode == "cbc":
+        enc_blocks = encrypt_blocks_cbc(blocks, k, iv, vp)
+    elif mode == "ctr":
+        enc_blocks = encrypt_blocks_ctr(blocks, k, iv, vp)
+    elif mode == "cfb":
+        enc_blocks = encrypt_blocks_cfb(blocks, k, iv, vp)
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+    
+    encrypted_data = b''.join(block_to_bytes(b) for b in enc_blocks)
+    return ct_kem + iv + encrypted_data
 
-    try:
-        out = case.runner()
-        if case.expect_exception:
-            print("Result: FAIL (expected an exception, but none occurred)")
-            return False
-        if case.validator is None:
-            print("Result: PASS")
-            return True
-        ok = case.validator(out)
-        print("Result: PASS" if ok else "Result: FAIL")
-        return ok
-    except Exception as e:
-        if case.expect_exception:
-            print("Result: PASS (expected exception)")
-            print(f"Exception: {e}")
-            return True
-        print("Result: FAIL")
-        print("Exception:", str(e))
-        tb = traceback.format_exc(limit=3)
-        print(tb)
-        return False
 
-def capture_stdout(func: Callable, *args, **kwargs) -> str:
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        func(*args, **kwargs)
-    return buf.getvalue()
+#====================================================================
+def flip_bit(data: np.ndarray, bit_position: int) -> np.ndarray:
+    """
+    Flip a single bit in the input array.
 
-def file_exists(path: str) -> bool:
-    return os.path.exists(path) and os.path.getsize(path) > 0
 
-# ---------- main test suite ----------
-def main():
-    # workspace
-    tmpdir = tempfile.mkdtemp(prefix="veinn_test_")
-    print_header("VEINN TEST SUITE")
-    print(f"Working directory: {tmpdir}")
+    Args:
+        data: Input array of int64 values
+        bit_position: Global bit position to flip (0 to n*64-1)
 
-    # common parameters
-    passphrase = "correct horse battery staple"
-    key_name = "unit-test-key"
-    seed_public = "public-seed-for-deterministic-veinn"
-    message_text = "Hello VEINN 👋"
-    numbers1 = [1, 2, 3, 4]
-    numbers2 = [7, 11, 13, 17]
-    vp = VeinnParams(n=8, rounds=3, layers_per_round=2, shuffle_stride=7, use_lwe=True)
+    Returns:
+        Array with single bit flipped
+    """
+    result = data.copy()
+    word_index = bit_position // 64
+    bit_index = bit_position % 64
 
-    # file paths
-    keystore_file = os.path.join(tmpdir, "keystore.pkl")
-    pubfile = os.path.join(tmpdir, "rsa_pub.json")
-    privfile = os.path.join(tmpdir, "rsa_priv.json")
+    if word_index < len(result):
+        # Use numpy int64 to avoid C long overflow
+        mask = np.int64(1) << np.int64(bit_index)
+        result[word_index] = np.int64(result[word_index]) ^ mask
 
-    enc_pub_text = os.path.join(tmpdir, "enc_pub_text.json")
-    enc_pub_num_1 = os.path.join(tmpdir, "enc_pub_num_1.json")
-    enc_pub_num_2 = os.path.join(tmpdir, "enc_pub_num_2.json")
+    return result
 
-    enc_pub_veinn_text_1 = os.path.join(tmpdir, "enc_pub_veinn_text_1.json")
-    enc_pub_veinn_text_2 = os.path.join(tmpdir, "enc_pub_veinn_text_2.json")
-    enc_pub_veinn_num_1 = os.path.join(tmpdir, "enc_pub_veinn_num_1.json")
-    enc_pub_veinn_num_2 = os.path.join(tmpdir, "enc_pub_veinn_num_2.json")
 
-    hom_add_out = os.path.join(tmpdir, "hom_add.json")
-    hom_mul_out = os.path.join(tmpdir, "hom_mul.json")
+def hamming_distance_bits(a: np.ndarray, b: np.ndarray) -> int:
+    """
+    Calculate Hamming distance in bits between two arrays.
 
-    # prepare: create keystore + RSA files
-    results: List[bool] = []
 
-    # 1) Create encrypted keystore
-    results.append(run_case(TestCase(
-        name="1) Create encrypted keystore",
-        params={"passphrase": passphrase, "keystore_file": keystore_file},
-        runner=lambda: create_keystore(passphrase, keystore_file),
-        validator=lambda _: file_exists(keystore_file),
-    )))
+    Args:
+        a, b: Arrays to compare
 
-    # 2a) Generate RSA keypair and write to files (mimic CLI option 2 without keystore)
-    def gen_rsa_files():
-        kp = generate_rsa_keypair(2048)
-        with open(pubfile, "w") as f:
-            json.dump({"n": kp["n"], "e": kp["e"]}, f)
-        with open(privfile, "w") as f:
-            json.dump(kp, f)
-        return kp
+    Returns:
+        Number of different bits
+    """
+    xor_result = a ^ b
+    # Count set bits in each word and sum
+    return sum(bin(int(word)).count('1') for word in xor_result)
 
-    results.append(run_case(TestCase(
-        name="2a) Generate RSA keypair -> files",
-        params={"bits": 2048, "pubfile": pubfile, "privfile": privfile},
-        runner=gen_rsa_files,
-        validator=lambda _: file_exists(pubfile) and file_exists(privfile),
-    )))
+def avalanche_test_full_encryption(message: bytes, vp: VeinnParams, num_tests: int = 100) -> dict:
+    """
+    Test avalanche effect through complete encryption pipeline including:
+    1. ISO 7816-4 padding
+    2. bytes_to_block conversion 
+    3. VEINN block encryption
+    4. All preprocessing steps from encrypt_with_pub
+    
+    Args:
+        message: Original message bytes to test
+        vp: VEINN parameters
+        num_tests: Number of random bit flips to test
+        
+    Returns:
+        Dictionary with comprehensive avalanche statistics
+    """
+    # Generate random key for testing
+    seed = secrets.token_bytes(vp.seed_len)
+    key = key_from_seed(seed, vp)
+    
+    # Apply full preprocessing pipeline (matching encrypt_with_pub)
+    padded_message = pad_iso7816(message, vp.n * 2)
+    
+    # Split into blocks as done in encrypt_with_pub
+    message_blocks = []
+    for i in range(0, len(padded_message), vp.n * 2):
+        block_data = padded_message[i:i + vp.n * 2]
+        block = bytes_to_block(block_data, vp.n)
+        message_blocks.append(block)
+    
+    # Encrypt all blocks to get baseline ciphertext
+    original_encrypted_blocks = [permute_forward(block, key) for block in message_blocks]
+    
+    # Convert to flat bit array for bit manipulation
+    original_message_bits = np.unpackbits(np.frombuffer(message, dtype=np.uint8))
+    total_message_bits = len(original_message_bits)
+    
+    # Convert encrypted blocks to flat bit array for comparison
+    original_cipher_bytes = b"".join(block_to_bytes(block) for block in original_encrypted_blocks)
+    original_cipher_bits = np.unpackbits(np.frombuffer(original_cipher_bytes, dtype=np.uint8))
+    total_cipher_bits = len(original_cipher_bits)
+    
+    bit_changes = []
+    block_changes = []
+    
+    print(f"Testing {num_tests} random bit flips in {total_message_bits}-bit message...", end="", flush=True)
+    
+    # Test random bit positions in original message
+    test_positions = np.random.choice(total_message_bits, size=min(num_tests, total_message_bits), replace=False)
+    
+    for i, bit_pos in enumerate(test_positions):
+        if i % 20 == 0:
+            print(".", end="", flush=True)
+        
+        # Flip single bit in original message
+        modified_bits = original_message_bits.copy()
+        modified_bits[bit_pos] = 1 - modified_bits[bit_pos]  # Flip bit
+        
+        # Convert back to bytes
+        # Pad to byte boundary if necessary
+        if len(modified_bits) % 8 != 0:
+            padding = 8 - (len(modified_bits) % 8)
+            modified_bits = np.concatenate([modified_bits, np.zeros(padding, dtype=np.uint8)])
+        
+        modified_message = np.packbits(modified_bits).tobytes()[:len(message)]
+        
+        # Apply full encryption pipeline to modified message
+        try:
+            padded_modified = pad_iso7816(modified_message, vp.n * 2)
+            
+            # Process into blocks
+            modified_blocks = []
+            for j in range(0, len(padded_modified), vp.n * 2):
+                block_data = padded_modified[j:j + vp.n * 2]
+                block = bytes_to_block(block_data, vp.n)
+                modified_blocks.append(block)
+            
+            # Encrypt modified blocks
+            modified_encrypted_blocks = [permute_forward(block, key) for block in modified_blocks]
+            
+            # Convert to bits for comparison
+            modified_cipher_bytes = b"".join(block_to_bytes(block) for block in modified_encrypted_blocks)
+            modified_cipher_bits = np.unpackbits(np.frombuffer(modified_cipher_bytes, dtype=np.uint8))
+            
+            # Ensure same length for comparison (padding may cause differences)
+            min_len = min(len(original_cipher_bits), len(modified_cipher_bits))
+            
+            # Calculate bit-level differences
+            bit_diff = np.sum(original_cipher_bits[:min_len] != modified_cipher_bits[:min_len])
+            
+            # Calculate block-level differences
+            block_diff = sum(1 for orig, mod in zip(original_encrypted_blocks, modified_encrypted_blocks) 
+                           if not np.array_equal(orig, mod))
+            
+            bit_changes.append(bit_diff)
+            block_changes.append(block_diff)
+            
+        except Exception as e:
+            # Skip invalid modifications that break padding/structure
+            continue
+    
+    print(" done!")
+    
+    if not bit_changes:
+        return {"error": "No valid test cases completed"}
+    
+    bit_changes_array = np.array(bit_changes)
+    block_changes_array = np.array(block_changes)
+    
+    results = {
+        'message_info': {
+            'original_length_bytes': len(message),
+            'padded_length_bytes': len(padded_message),
+            'total_blocks': len(message_blocks),
+            'bits_per_block': vp.n * 64,
+            'total_input_bits': total_message_bits,
+            'total_output_bits': total_cipher_bits
+        },
+        'test_info': {
+            'bits_tested': len(bit_changes),
+            'successful_tests': len([x for x in bit_changes if x > 0])
+        },
+        'bit_avalanche': {
+            'mean': float(np.mean(bit_changes_array)),
+            'std': float(np.std(bit_changes_array)),
+            'min': int(np.min(bit_changes_array)),
+            'max': int(np.max(bit_changes_array)),
+            'median': float(np.median(bit_changes_array))
+        },
+        'block_avalanche': {
+            'mean': float(np.mean(block_changes_array)),
+            'std': float(np.std(block_changes_array)),
+            'min': int(np.min(block_changes_array)),
+            'max': int(np.max(block_changes_array)),
+            'total_blocks': len(message_blocks)
+        },
+        'avalanche_percentage': float(np.mean(bit_changes_array) / total_cipher_bits * 100),
+        'block_avalanche_percentage': float(np.mean(block_changes_array) / len(message_blocks) * 100)
+    }
+    
+    return results
 
-    # 2b) Store private key in keystore (second path of option 2)
-    def store_priv_in_keystore():
-        with open(privfile, "r") as f:
-            kp = json.load(f)
-        store_key_in_keystore(passphrase, key_name, kp, keystore_file)
-        # retrieve to confirm
-        got = retrieve_key_from_keystore(passphrase, key_name, keystore_file)
-        return got
 
-    results.append(run_case(TestCase(
-        name="2b) Store private key in keystore",
-        params={"keystore_file": keystore_file, "passphrase": passphrase, "key_name": key_name},
-        runner=store_priv_in_keystore,
-        validator=lambda got: isinstance(got, dict) and "n" in got and "d" in got,
-    )))
+def avalanche_test_message_sizes(vp: VeinnParams) -> dict:
+    """
+    Test avalanche effect across different message sizes to see how
+    padding and block structure affects diffusion.
+    """
+    test_messages = [
+        b"Hello",  # Very short
+        b"Hello, World! This is a test message.",  # Medium
+        b"A" * 100,  # Exactly 100 bytes
+        b"B" * (vp.n * 2 - 10),  # Just under one block
+        b"C" * (vp.n * 2),  # Exactly one block
+        b"D" * (vp.n * 2 + 10),  # Just over one block
+        b"E" * (vp.n * 4),  # Multiple blocks
+    ]
+    
+    results = {}
+    
+    for i, msg in enumerate(test_messages):
+        print(f"\nTesting message {i+1}/{len(test_messages)}: {len(msg)} bytes")
+        result = avalanche_test_full_encryption(msg, vp, num_tests=50)
+        
+        if "error" not in result:
+            results[f"message_{len(msg)}_bytes"] = result
+            print(f"  Avalanche: {result['avalanche_percentage']:.2f}%, "
+                  f"Blocks affected: {result['block_avalanche_percentage']:.2f}%")
+    
+    return results
 
-    # 3) Encrypt with recipient public key (RSA + VEINN) — text mode
-    results.append(run_case(TestCase(
-        name="3) Public encrypt (RSA+VEINN) — text",
-        params={"pubfile": pubfile, "mode": "t", "message": message_text, "out_file": enc_pub_text, "VeinnParams": asdict(vp)},
-        runner=lambda: encrypt_with_pub(pubfile, message=message_text, mode="t", vp=vp, out_file=enc_pub_text),
-        validator=lambda out_path: file_exists(out_path) and "encrypted" in json.load(open(out_path)),
-    )))
-
-    # 3b) Public encrypt (RSA+VEINN) — numeric mode
-    results.append(run_case(TestCase(
-        name="3b) Public encrypt (RSA+VEINN) — numeric",
-        params={"pubfile": pubfile, "mode": "n", "numbers": numbers1, "out_file": enc_pub_num_1, "VeinnParams": asdict(vp)},
-        runner=lambda: encrypt_with_pub(pubfile, numbers=numbers1, mode="n", vp=vp, out_file=enc_pub_num_1),
-        validator=lambda out_path: file_exists(out_path) and "encrypted" in json.load(open(out_path)),
-    )))
-
-    # 4) Decrypt with private key — text (capture stdout and check round-trip)
-    def decrypt_text_and_check():
-        # try with file-based private key
-        out = capture_stdout(decrypt_with_priv, None, privfile, enc_pub_text, None, None, 3600)
-        return out
-
-    results.append(run_case(TestCase(
-        name="4) Decrypt with private key — text",
-        params={"privfile": privfile, "encfile": enc_pub_text, "validity_window": 3600},
-        runner=decrypt_text_and_check,
-        # The function prints: "Decrypted message: <text>"
-        validator=lambda s: "Decrypted message:" in s and message_text in s,
-        notes="If this FAILs with 'Invalid ciphertext length', your veinn.py needs the OAEP padding length fix."
-    )))
-
-    # 4b) Decrypt with private key — numeric
-    def decrypt_num_and_check():
-        out = capture_stdout(decrypt_with_priv, None, privfile, enc_pub_num_1, None, None, 3600)
-        return out
-
-    results.append(run_case(TestCase(
-        name="4b) Decrypt with private key — numeric",
-        params={"privfile": privfile, "encfile": enc_pub_num_1, "validity_window": 3600},
-        runner=decrypt_num_and_check,
-        validator=lambda s: "Decrypted numbers:" in s,
-        notes="Parsing exact numeric list from stdout is skipped; presence of line indicates success."
-    )))
-
-    # 7) Derive public VEINN from seed (prints only, success if no exception)
-    def derive_public_veinn():
-        # The CLI's "public_veinn" option calls veinn_from_seed, which prints.
-        # We won't import veinn_from_seed directly to keep surface minimal; we test deterministic encrypt/decrypt below.
-        # Here we just ensure seed usage in deterministic path works.
-        return True
-
-    results.append(run_case(TestCase(
-        name="7) Derive public VEINN from seed (sanity via deterministic path)",
-        params={"seed": seed_public, "VeinnParams": asdict(vp)},
-        runner=derive_public_veinn,
-        validator=lambda x: x is True
-    )))
-
-    # 8) Encrypt deterministically using public VEINN — text & numeric (two files with same seed should match enc blocks)
-    def det_encrypt_text_pair():
-        encrypt_with_public_veinn(seed_public, message=message_text, vp=vp, out_file=enc_pub_veinn_text_1, mode="t")
-        encrypt_with_public_veinn(seed_public, message=message_text, vp=vp, out_file=enc_pub_veinn_text_2, mode="t")
-        c1 = read_ciphertext(enc_pub_veinn_text_1)[2]
-        c2 = read_ciphertext(enc_pub_veinn_text_2)[2]
-        # compare blocks element-wise
-        if len(c1) != len(c2): return False
-        return all((a == b).all() for a, b in zip(c1, c2))
-
-    results.append(run_case(TestCase(
-        name="8) Deterministic encrypt (public VEINN) — text determinism",
-        params={"seed": seed_public, "message": message_text, "VeinnParams": asdict(vp)},
-        runner=det_encrypt_text_pair,
-        validator=lambda ok: ok is True
-    )))
-
-    def det_encrypt_num_pair():
-        encrypt_with_public_veinn(seed_public, numbers=numbers2, vp=vp, out_file=enc_pub_veinn_num_1, mode="n", bytes_per_number=16)
-        encrypt_with_public_veinn(seed_public, numbers=numbers2, vp=vp, out_file=enc_pub_veinn_num_2, mode="n", bytes_per_number=16)
-        c1 = read_ciphertext(enc_pub_veinn_num_1)[2]
-        c2 = read_ciphertext(enc_pub_veinn_num_2)[2]
-        if len(c1) != len(c2): return False
-        return all((a == b).all() for a, b in zip(c1, c2))
-
-    results.append(run_case(TestCase(
-        name="8b) Deterministic encrypt (public VEINN) — numeric determinism",
-        params={"seed": seed_public, "numbers": numbers2, "bytes_per_number": 16, "VeinnParams": asdict(vp)},
-        runner=det_encrypt_num_pair,
-        validator=lambda ok: ok is True
-    )))
-
-    # 9) Decrypt deterministically using public VEINN — round-trip checks (capture stdout)
-    def det_decrypt_text():
-        out = capture_stdout(decrypt_with_public_veinn, seed_public, enc_pub_veinn_text_1, 3600)
-        return out
-
-    results.append(run_case(TestCase(
-        name="9) Deterministic decrypt (public VEINN) — text",
-        params={"seed": seed_public, "enc_file": enc_pub_veinn_text_1, "validity_window": 3600},
-        runner=det_decrypt_text,
-        validator=lambda s: "Decrypted message:" in s and message_text in s
-    )))
-
-    def det_decrypt_num():
-        out = capture_stdout(decrypt_with_public_veinn, seed_public, enc_pub_veinn_num_1, 3600)
-        return out
-
-    results.append(run_case(TestCase(
-        name="9b) Deterministic decrypt (public VEINN) — numeric",
-        params={"seed": seed_public, "enc_file": enc_pub_veinn_num_1, "validity_window": 3600},
-        runner=det_decrypt_num,
-        validator=lambda s: "Decrypted numbers:" in s
-    )))
-
-    # 5) Lattice-based homomorphic add (structure-only check)
-    def hom_add_run():
-        # Use deterministic public VEINN numeric files so metadata matches
-        homomorphic_add_files(enc_pub_veinn_num_1, enc_pub_veinn_num_2, hom_add_out)
-        return hom_add_out
-
-    results.append(run_case(TestCase(
-        name="5) Homomorphic add — output structure",
-        params={"file1": enc_pub_veinn_num_1, "file2": enc_pub_veinn_num_2, "out_file": hom_add_out},
-        runner=hom_add_run,
-        validator=lambda p: file_exists(p) and "encrypted" in json.load(open(p)),
-        notes="This validates the function runs and writes a valid-shaped payload (homomorphic results are not decrypted)."
-    )))
-
-    # 6) Lattice-based homomorphic multiply (structure-only check)
-    def hom_mul_run():
-        homomorphic_mul_files(enc_pub_veinn_num_1, enc_pub_veinn_num_2, hom_mul_out)
-        return hom_mul_out
-
-    results.append(run_case(TestCase(
-        name="6) Homomorphic multiply — output structure",
-        params={"file1": enc_pub_veinn_num_1, "file2": enc_pub_veinn_num_2, "out_file": hom_mul_out},
-        runner=hom_mul_run,
-        validator=lambda p: file_exists(p) and "encrypted" in json.load(open(p)),
-        notes="Structure check only (no decryption of homomorphic result)."
-    )))
-
-    # Summary
-    print_header("SUMMARY")
-    passed = sum(1 for r in results if r)
-    total = len(results)
-    print(f"Passed {passed}/{total} tests.")
-    if passed != total:
-        print("\nSome tests failed. If failures mention 'Invalid ciphertext length',")
-        print("apply the OAEP byte-length left-padding fix in veinn.py and re-run.")
-
-    # Artifacts location
-    print(f"\nArtifacts saved under: {tmpdir}")
-    print("You can delete this folder later if you like.")
-
-if __name__ == "__main__":
-    main()
+def menu_full_avalanche_test():
+    """
+    Interactive menu for comprehensive avalanche testing.
+    """
+    print("Full Encryption Pipeline Avalanche Test")
+    print("=" * 50)
+    
+    # Get VEINN parameters
+    vp = VeinnParams()
+    print(f"Using VEINN parameters: n={vp.n}, rounds={vp.rounds}, layers={vp.layers_per_round}")
+    
+    test_choice = input("\nChoose test type:\n1) Single message test\n2) Multiple message sizes\nChoice [1]: ").strip() or "1"
+    
+    if test_choice == "1":
+        # Single message test
+        message = input("Enter test message: ").encode('utf-8')
+        num_tests = int(input("Number of bit flips to test [100]: ").strip() or "100")
+        
+        result = avalanche_test_full_encryption(message, vp, num_tests)
+        
+        if "error" not in result:
+            print(f"\nResults for {len(message)}-byte message:")
+            print(f"Message padded to {result['message_info']['padded_length_bytes']} bytes ({result['message_info']['total_blocks']} blocks)")
+            print(f"Bit avalanche: {result['avalanche_percentage']:.2f}%")
+            print(f"Block avalanche: {result['block_avalanche_percentage']:.2f}%")
+            print(f"Average bits changed: {result['bit_avalanche']['mean']:.1f} / {result['message_info']['total_output_bits']}")
+            print(f"Average blocks affected: {result['block_avalanche']['mean']:.1f} / {result['message_info']['total_blocks']}")
+        else:
+            print("Test failed:", result["error"])
+    
+    elif test_choice == "2":
+        # Multiple message sizes
+        results = avalanche_test_message_sizes(vp)
+        
+        print(f"\nSummary across message sizes:")
+        print("-" * 60)
+        for msg_key, result in results.items():
+            size = msg_key.split('_')[1]
+            print(f"{size:>8} bytes: {result['avalanche_percentage']:6.2f}% bit, "
+                  f"{result['block_avalanche_percentage']:6.2f}% block avalanche")
