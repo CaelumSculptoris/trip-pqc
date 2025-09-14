@@ -2541,7 +2541,7 @@ def menu_generate_keypair():
     - Key management: Secure storage options for private keys
     """
     pubfile = input("Public key filename (default public_key.json): ").strip() or "public_key.json"
-    use_keystore = input("Store private key in keystore? (y/n): ").strip().lower() or "y"
+    use_keystore = input("Store private key in keystore? (y/n) [y]: ").strip().lower() or "y"
     
     privfile, keystore, passphrase, key_name = None, None, None, None
     if use_keystore == "y":
@@ -2589,10 +2589,10 @@ def menu_encrypt_with_pub():
     print("- CBC: Cipher Block Chaining (XOR previous ciphertext with current plaintext)")
     print("- CTR: Counter mode (encrypt counter + nonce, XOR with plaintext)")
     print("- CFB: Cipher Feedback (encrypt previous ciphertext, XOR with plaintext)")
-    mode = input("Choose cbc, ctr, or cfb [cbc] : ").strip() or "cbc"
+    mode = input("Choose cbc, ctr, or cfb [cbc]: ").strip() or "cbc"
 
     inpath = input("Optional input file path (blank = prompt): ").strip() or None    
-    file_type = input("Output file type (JSON/BIN) [json] : ").strip() or "json"
+    file_type = input("Output file type (JSON/BIN) [json]: ").strip() or "json"
     
     # Collect Veinn parameters
     n, rounds, layers_per_round, shuffle_stride, use_lwe, nonce_str, q = options()
@@ -2696,7 +2696,7 @@ def menu_encrypt_with_public_veinn():
     print("- CBC: Cipher Block Chaining (XOR previous ciphertext with current plaintext)")
     print("- CTR: Counter mode (encrypt counter + nonce, XOR with plaintext)")
     print("- CFB: Cipher Feedback (encrypt previous ciphertext, XOR with plaintext)")
-    mode = input("Choose cbc, ctr, or cfb [cbc] : ").strip() or "cbc"
+    mode = input("Choose cbc, ctr, or cfb [cbc]: ").strip() or "cbc"
     if use_keystore == "y":
         keystore = input("Keystore filename (default keystore.json): ").strip() or "keystore.json"
         passphrase = input("Keystore passphrase: ")
@@ -2899,10 +2899,6 @@ def main():
                                 menu_decrypt_with_public_veinn()
                             case "7":
                                 menu_veinn_from_seed()
-                            case "8":
-                                #menu_full_avalanche_test()
-                                vp = VeinnParams()
-                                test_chaining_modes_avalanche(vp)
                             case _:
                                 print("Invalid choice")
                     except Exception as e:
