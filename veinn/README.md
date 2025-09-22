@@ -1,272 +1,204 @@
 ![alt text](veinn.jpg "But you have heard of me.")
 # VEINN: Vector Encrypted Invertible Neural Network
 
-VEINN is a **post-quantum cryptographic** primitive that combines:
+VEINN (Vector Encrypted Invertible Neural Network) is an **experimental
+symmetric encryption design** that applies concepts from both
+**cryptography** and **invertible neural networks**.
 
-- **Invertible Neural Networks (INNs)**  
-- **Lattice-based cryptography (LWE/RLWE hardness)**  
-- **Homomorphic encryption features**  
+Unlike traditional ciphers such as AES (128-bit block) or ChaCha20
+(stream cipher), VEINN works on **large vector states** (e.g., hundreds
+or thousands of elements) and transforms them through a sequence of
+**invertible layers**. The goal is to combine:
 
-to form a **vector-space symmetric cipher** with **post-quantum security assumptions**.  
+-   **Wide-block encryption** -- improving resistance against
+    cut-and-paste and block manipulation attacks.
+-   **Post-quantum readiness** -- integration with lattice-based key
+    exchange (KEM/DEM).
+-   **Novel cryptographic primitives** -- inspired by algebraic
+    structures and neural network design.
 
-VEINN encrypts data blockwise as vectors in $\mathbb{Z}_{2^{16}}^n$, applying coupling layers, modular scalings, and shuffles derived from a seed. Optionally, **Learning With Errors (LWE)**-based pseudorandom functions (PRFs) are used in the key schedule, embedding lattice hardness. The result is a **fast, invertible, lattice-secure block cipher** that supports **homomorphic addition and multiplication**.
+------------------------------------------------------------------------
 
----
+## Features
 
-## ✨ Features
+- 🔒 **Large block size**: typical instance uses `n = 512` words (~4 KB state).
+- 🔄 **Invertible layers**: every round is invertible by design.
+- 🧮 **Algebraic S-boxes**: nonlinear layer using modular inverse in a finite field.
+- ⚡ **Fast mixing**: intra-block diffusion via NTT convolution.
+- 🧑‍💻 **Reference Python implementation** with clarity > performance.
+- 📊 **Built-in test harness**: avalanche testing, S-box analysis, NTT validation. (Coming soon) 
 
-- 🔑 **Seed-based symmetric cipher** with compact key derivation.  
-- 🔄 **Invertible neural network structure** (coupling layers, modular scaling, shuffles).  
-- 🧮 **Lattice security** via LWE-based PRF for mask/scale derivation.  
-- ➕ **Homomorphic addition** of ciphertexts (plaintext sums preserved).  
-- ✖️ **Homomorphic multiplication** via negacyclic convolution (plaintext product in ring).  
-- ⚡ **Efficient vectorized arithmetic**: modular 16-bit ops, SIMD/GPU-friendly.  
-- 📦 **Metadata + HMAC** included for integrity and replay protection.  
-- 🔐 **Post-quantum resistance** against both classical and quantum attacks.  
+------------------------------------------------------------------------
 
----
+## Core Mathematical & Cryptographic Principles
 
-## 📂 Project Structure
+### 1. Modular Arithmetic over a Prime Field
 
-```
-veinn.py        # Core VEINN implementation (encryption, decryption, key schedule)
-README.md       # Project overview (this file)
-```
+All operations are performed modulo a large prime `q`.
+This provides a clean algebraic structure (a finite field), which
+ensures invertibility of multiplicative operations and supports modular
+inverse S-boxes.
 
-Key components in `veinn.py`:
+### 2. Invertible Coupling Layers
 
-- **Block conversion**: `bytes_to_block`, `block_to_bytes`
-- **Key schedule**: `key_from_seed`, `VeinnParams`, `VeinnKey`
-- **Coupling layers**: `coupling_forward`, `coupling_inverse`
-- **Round transforms**: `permute_forward`, `permute_inverse`
-- **Homomorphic ops**: `homomorphic_add`, `homomorphic_multiply`
-- **Integrity**: HMAC binding of ciphertext + metadata
+Borrowed from invertible neural networks (e.g., RealNVP, Glow):
+- The state vector is split into halves `(x1, x2)`.
+- One half is updated using a function of the other, then roles are
+swapped.
+- These transformations are inherently invertible, ensuring
+reversibility for encryption/decryption.
 
----
+### 3. Nonlinear Substitution (S-box Layer)
 
-## 🚀 Quick Start
+Nonlinearity is introduced by applying a **modular inverse S-box**
+elementwise:
 
-### Installation
+\[ y = x\^{-1} `\pmod `{=tex}q \]
 
-Clone the repo:
-```bash
-git clone https://github.com/CaelumSculptoris/veinn.git
+This acts like the AES S-box but over a large finite field, ensuring
+algebraic complexity and confusion.
+
+### 4. Diffusion via NTT Convolution
+
+VEINN uses the **Number Theoretic Transform (NTT)** to mix elements of
+the state:
+- Similar to the FFT, but defined over modular arithmetic.
+- Ensures that small changes in input propagate across the entire state
+vector.
+- Provides strong diffusion and algebraic structure useful for
+cryptographic mixing.
+
+### 5. Key Injection
+
+At each round, subkeys derived from the master key are injected via
+addition or multiplication modulo `q`.
+This ensures dependence on secret key material at every transformation
+step.
+
+### 6. Round Composition
+
+Each round consists of: 
+1. Coupling layer (invertible transformation).
+2. Nonlinear modular inverse S-box.
+3. NTT-based mixing / permutation.
+4. Key injection.
+
+Decryption is simply the inverse sequence of these steps.
+
+------------------------------------------------------------------------
+
+## Why This Matters
+
+-   **Novelty**: Introduces neural-network-style invertible layers into
+    symmetric cryptography.
+-   **Security Goals**: Wide-block design for stronger resistance
+    against structural attacks.
+-   **Post-Quantum Context**: Intended for use with lattice-based KEMs
+    in hybrid encryption.
+-   **Research Value**: Serves as a testbed for exploring the fusion of
+    algebraic cryptography and ML-inspired invertibility.
+
+------------------------------------------------------------------------
+
+## Summary
+
+VEINN is **not a drop-in AES replacement**, but a **research-oriented
+cipher construction**.
+It demonstrates how modular arithmetic, NTT-based mixing, and invertible
+neural network principles can be combined to build a new family of
+wide-block encryption schemes.
+
+------------------------------------------------------------------------
+
+**Note**: This project is purely experimental. The security of VEINN has
+not been formally established.
+
+------------------------------------------------------------------------
+
+## How It Works
+
+A VEINN encryption round consists of:
+
+1.  **Coupling Layer**
+    -   The state vector is split into two halves `(x1, x2)`.
+    -   One half is updated based on the other using modular arithmetic,
+        convolutions, and nonlinearities.
+    -   Structure ensures invertibility (like RealNVP or Glow in ML).
+2.  **Nonlinear Layer (S-box)**
+    -   Each element is transformed with a modular inverse function:
+        `y = x⁻¹ mod q` (with special handling for zero).
+    -   This provides nonlinearity and confusion, analogous to AES
+        S-boxes.
+3.  **Mixing / Permutation**
+    -   The vector is permuted or mixed using **NTT-based
+        convolutions**.
+    -   This spreads information across all positions, ensuring
+        diffusion.
+4.  **Key Injection**
+    -   Key material is added or multiplied into the state at each
+        round.
+
+Repeat these steps for multiple rounds (e.g. 12--20). Decryption works
+by running the exact inverse of each step in reverse order.
+
+------------------------------------------------------------------------
+
+## Why VEINN?
+
+-   **Wide-block security**: Resists cut-and-paste and
+    block-rearrangement attacks that plague small-block ciphers.
+-   **Post-quantum integration**: Designed to be paired with
+    lattice-based KEMs (e.g., Kyber) as a DEM in hybrid encryption.
+-   **Novel construction**: Bridges machine learning concepts
+    (invertible networks) with cryptographic design.
+-   **Strong diffusion**: NTT convolution mixes entire vectors quickly.
+
+------------------------------------------------------------------------
+
+## Example Use Cases
+
+-   Encrypting large database fields or disk sectors as a single block.
+-   Serving as the symmetric component in **PQ KEM/DEM hybrids**.
+-   A research platform for testing ML-inspired invertible layers in
+    crypto.
+
+------------------------------------------------------------------------
+
+## Getting Started
+
+``` bash
+git clone https://github.com/caelumsculptoris/veinn
 cd veinn
-```
-
-(Requires Python 3.8+ and `numpy`.)
-
-Install dependencies:
-```bash
 python3 -m venv veinn
 source bin/activate
 pip install -r requirements.txt
+python3 -m src.main
 ```
+------------------------------------------------------------------------
 
-### Usage via CLI
+## Security Notes
 
-#### Menu access
-```bash
-python3 cli/veinn.py 
-```
+-   No formal proofs of security yet. (Potentially reduces to RWLE)
+-   Needs analysis against differential, linear, algebraic, and
+    structural attacks.
+-   Provided *solely* as a research artifact. Do not deploy in
+    production.
 
-#### package access
-```bash
-python3 -m cli/package.cli
-```
+------------------------------------------------------------------------
 
-#### Encrypt a file
-```bash
-python veinn.py encrypt --infile plaintext.txt --outfile ciphertext.json --seed mysecretseed
-```
+## Citation
 
-#### Decrypt a file
-```bash
-python veinn.py decrypt --infile ciphertext.json --outfile recovered.txt --seed mysecretseed
-```
+If you use VEINN in academic work:
 
-#### Homomorphic addition
-```bash
-python veinn.py add --infile1 ciphertext1.json --infile2 ciphertext2.json --outfile sum.json
-```
+    @misc{veinn2025,
+      title   = {VEINN: Vector Encrypted Invertible Neural Network},
+      author  = {Cal Sculptoris},
+      year    = {2025},
+      note    = {Research prototype, https://github.com/caelumsculptoris/veinn}
+    }
 
-#### Homomorphic multiplication
-```bash
-python veinn.py mul --infile1 ciphertext1.json --infile2 ciphertext2.json --outfile product.json
-```
+------------------------------------------------------------------------
 
----
+## License
 
-## 🐍 Examples (Python API)
-
-You can also use **VEINN directly from Python**:
-
-```python
-from veinn import encrypt, decrypt, homomorphic_add
-
-# Secret seed (used to derive key + parameters)
-seed = "mysecretseed"
-
-# Messages
-msg1 = b"hello world"
-msg2 = b"goodbye world"
-
-# Encrypt both
-ct1 = encrypt(msg1, seed)
-ct2 = encrypt(msg2, seed)
-
-# Homomorphic addition (ciphertexts add → plaintexts add)
-ct_sum = homomorphic_add(ct1, ct2)
-
-# Decrypt results
-dec1 = decrypt(ct1, seed)
-dec2 = decrypt(ct2, seed)
-dec_sum = decrypt(ct_sum, seed)
-
-print("Decrypted msg1:", dec1)
-print("Decrypted msg2:", dec2)
-print("Decrypted homomorphic sum:", dec_sum)
-```
-
-This produces:
-```
-Decrypted msg1: b'hello world'
-Decrypted msg2: b'goodbye world'
-Decrypted homomorphic sum: b'...'  # vector sum of plaintexts
-```
-
----
-
-## 🔬 How It Works
-
-### Vector Encryption
-- Plaintext is split into blocks, converted into vectors in $\mathbb{Z}_{2^{16}}^n$.  
-- Each block passes through multiple **rounds** of:
-  1. **Coupling layers** (invertible, RealNVP-style).  
-  2. **Elementwise scaling** by odd vectors (invertible mod $2^{16}$).  
-  3. **Shuffle permutations** for diffusion.  
-
-### Lattice Security
-- Parameters derived from seed using SHAKE or an **LWE-based PRF**.  
-- LWE PRF introduces lattice-hardness assumptions (believed post-quantum secure).  
-
-### Homomorphism
-- Ciphertexts form a **vector space**:  
-  - Addition of ciphertexts → addition of plaintexts.  
-  - Negacyclic convolution of ciphertexts → multiplication of plaintexts (in ring).  
-
----
-
-## 📊 Comparison
-
-| Scheme   | Type        | PQ Secure? | Homomorphic? | Performance |
-|----------|------------|------------|--------------|-------------|
-| AES-128  | Block cipher | ❌ (Grover) | No           | High |
-| RSA/ECC  | Public-key  | ❌ (Shor)   | No           | Medium |
-| Kyber    | Lattice KEM | ✅          | Limited      | Medium |
-| CKKS     | Lattice FHE | ✅          | Yes (approx) | Low |
-| **VEINN** | Symmetric  | ✅ (LWE)    | Yes (add/mul)| High |
-
----
-
-## 🛡️ Security
-
-- **Classical attacks**: Differential/linear cryptanalysis hindered by nonlinear couplings + random scalings.  
-- **Quantum attacks**: Grover limited by seed size (recommend ≥256-bit seed). LWE PRF resists known quantum algorithms.  
-- **Integrity**: HMAC ensures ciphertext authenticity.  
-
----
-
-## 📚 References
-
-- O. Regev, *On Lattices, Learning with Errors, Random Linear Codes, and Cryptography*, STOC 2005.  
-- Cheon et al., *CKKS: Homomorphic Encryption for Approximate Arithmetic*, 2017.  
-- Dinh et al., *Revisiting the Security of Normalizing Flows*, 2022 (INN concepts).  
-- VEINN arXiv draft (2025).  
-
----
-
-## ⚠️ Disclaimer
-
-This project is **experimental cryptography**.  
-It is not yet standardized, audited, or production-ready. Use at your own risk.
-
----
-
-## 📜 License
-
-MIT License
-
-## Notes   
-   - Avalanche test shows good single block obfuscation but poor multiblock obfuscation. Implemented block chaining.
-
-### Updates   
-   - Added chaining modes.
-
-### TODO
-   - Update package
-   - Integrate block chaining avalanche tests
-   
-
-### Avalanche Test Results
-Using VEINN parameters: n=512, rounds=15, layers=15
-
-Choose test type:
-1) Single message test
-2) Multiple message sizes
-Choice [1]: 1
-Enter test message: This is a test
-Number of bit flips to test [100]: 
-Testing 100 random bit flips in 112-bit message........ done!
-
-Results for 14-byte message:
-Message padded to 1024 bytes (1 blocks)
-Bit avalanche: 49.99%
-Block avalanche: 100.00%
-Average bits changed: 4095.3 / 8192
-Average blocks affected: 1.0 / 1
-
-Using VEINN parameters: n=512, rounds=15, layers=15
-
-Choose test type:
-1) Single message test
-2) Multiple message sizes
-Choice [1]: 2
-
-Testing message 1/7: 5 bytes
-Testing 50 random bit flips in 40-bit message..... done!
-  Avalanche: 49.91%, Blocks affected: 100.00%
-
-Testing message 2/7: 37 bytes
-Testing 50 random bit flips in 296-bit message...... done!
-  Avalanche: 50.01%, Blocks affected: 100.00%
-
-Testing message 3/7: 100 bytes
-Testing 50 random bit flips in 800-bit message...... done!
-  Avalanche: 49.97%, Blocks affected: 100.00%
-
-Testing message 4/7: 1014 bytes
-Testing 50 random bit flips in 8112-bit message...... done!
-  Avalanche: 50.09%, Blocks affected: 100.00%
-
-Testing message 5/7: 1024 bytes
-Testing 50 random bit flips in 8192-bit message...... done!
-  Avalanche: 24.96%, Blocks affected: 50.00%
-
-Testing message 6/7: 1034 bytes
-Testing 50 random bit flips in 8272-bit message...... done!
-  Avalanche: 24.96%, Blocks affected: 50.00%
-
-Testing message 7/7: 2048 bytes
-Testing 50 random bit flips in 16384-bit message...... done!
-  Avalanche: 16.67%, Blocks affected: 33.33%
-
-Summary across message sizes:
-------------------------------------------------------------
-       5 bytes:  49.91% bit, 100.00% block avalanche
-      37 bytes:  50.01% bit, 100.00% block avalanche
-     100 bytes:  49.97% bit, 100.00% block avalanche
-    1014 bytes:  50.09% bit, 100.00% block avalanche
-    1024 bytes:  24.96% bit,  50.00% block avalanche
-    1034 bytes:  24.96% bit,  50.00% block avalanche
-    2048 bytes:  16.67% bit,  33.33% block avalanche
+MIT License --- see [LICENSE](LICENSE).
