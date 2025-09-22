@@ -178,7 +178,7 @@ python3 -m src.main
 
 ## Security Notes
 
--   No formal proofs of security yet. (Potentially reduces to RWLE)
+-   No formal proofs of security yet. (Potentially reduces to RLWE)
 -   Needs analysis against differential, linear, algebraic, and
     structural attacks.
 -   Provided *solely* as a research artifact. Do not deploy in
